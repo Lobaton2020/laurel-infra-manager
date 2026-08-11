@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.db
+.env
+
+# Credenciales del cluster: nunca deben subir al repo
+k3s.yaml
+kubeconfig*
+*.crt
+*.key
+*.pem
+
+# Editores / SO
+.idea/
+.vscode/
+.DS_Store
+*.swp
