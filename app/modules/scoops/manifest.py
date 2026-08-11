@@ -79,16 +79,15 @@ class ManifestService:
             "resources": ManifestService._resources(scoop),
         }
 
-        # Solo declaramos puerto y probes si el usuario los configuro. La imagen
-        # puede exponer cualquier puerto y responder cualquier path; el scoop no
-        # tiene por que asumirlo.
+        # container_port y health_path los fija el servidor al crear el scoop
+        # (ver ScoopService.create). Aqui solo se aplican: el generador no tiene
+        # que asumir nada porque los valores ya vienen validados.
         if scoop.container_port:
             port = scoop.container_port
             container["ports"] = [{"containerPort": port}]
-            if scoop.health_path:
-                probe = {"httpGet": {"path": scoop.health_path, "port": port}}
-                container["readinessProbe"] = {**probe, "initialDelaySeconds": 5, "periodSeconds": 5}
-                container["livenessProbe"] = {**probe, "initialDelaySeconds": 30, "periodSeconds": 10}
+            probe = {"httpGet": {"path": scoop.health_path or "/", "port": port}}
+            container["readinessProbe"] = {**probe, "initialDelaySeconds": 5, "periodSeconds": 5}
+            container["livenessProbe"] = {**probe, "initialDelaySeconds": 30, "periodSeconds": 10}
 
         return container
 
@@ -211,10 +210,8 @@ class ManifestService:
 
         manifests = [ManifestService.build_deployment(scoop, ns)]
 
-        # El Service solo se genera si conocemos el puerto del contenedor.
-        # Sin container_port el pod corre accesible internamente (DNS del servicio),
-        # pero no se puede publicar afuera.
-        if scoop.exposes_service and scoop.container_port:
+        # Todo scoop tipo 'api' genera Service: el container_port lo fija el server.
+        if scoop.exposes_service:
             manifests.append(ManifestService.build_service(scoop, ns))
 
         # Sin margen de escalado un HPA no aporta nada y ademas pelearia con replicas.

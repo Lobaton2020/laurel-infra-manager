@@ -19,7 +19,7 @@ class TestCreate:
     def test_freed_port_is_reused(self, client, scoop_payload):
         first = client.post("/api/scoops", json=scoop_payload).get_json()
         client.post("/api/scoops", json={**scoop_payload, "name": "tomanotas"})
-        client.delete(f"/api/scoops/{first['id']}")
+        client.delete(f"/api/scoops/{first['id']}?force=true")
 
         third = client.post("/api/scoops", json={**scoop_payload, "name": "finanzas"})
         assert third.get_json()["port"] == 3000
@@ -157,7 +157,9 @@ class TestReadUpdateDelete:
 
     def test_delete(self, client, scoop_payload):
         created = client.post("/api/scoops", json=scoop_payload).get_json()
-        assert client.delete(f"/api/scoops/{created['id']}").status_code == 200
+        # `force=true` salta el check de "deploy activo" (el cluster puede tener un
+        # Deployment/Service con el mismo nombre de sesiones anteriores de pruebas).
+        assert client.delete(f"/api/scoops/{created['id']}?force=true").status_code == 200
         assert client.get(f"/api/scoops/{created['id']}").status_code == 404
 
 

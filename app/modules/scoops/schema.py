@@ -96,12 +96,9 @@ class ScoopBase(BaseModel):
     namespace: Optional[str] = Field(None, max_length=63)
     schedule: Optional[str] = Field(None, max_length=100)
 
-    # --- Agnóstico de tecnología ---
-    # Puerto que expone la imagen. Si está, se genera Service con targetPort.
-    # Si no, el pod corre solo y se accede internamente por su nombre DNS.
-    container_port: Optional[int] = Field(None, ge=1, le=65535)
-    # Path HTTP para readiness/liveness. Requiere container_port.
-    health_path: Optional[str] = Field(None, max_length=255)
+    # NOTA: `container_port` y `health_path` los asigna el servidor desde la
+    # config global. Si en el futuro hay que exponerlos al usuario, se vuelven
+    # a anadir aqui.
 
     @field_validator("name")
     @classmethod
@@ -164,8 +161,8 @@ class ScoopUpdate(BaseModel):
     namespace: Optional[str] = Field(None, max_length=63)
     schedule: Optional[str] = Field(None, max_length=100)
 
-    container_port: Optional[int] = Field(None, ge=1, le=65535)
-    health_path: Optional[str] = Field(None, max_length=255)
+    # NOTA: container_port y health_path son solo lectura en la respuesta.
+    # Los asigna el servidor desde config; el cliente no los edita.
 
     @field_validator("requested_vcpu", "limit_vcpu")
     @classmethod

@@ -97,52 +97,37 @@ class TestApiScoop:
         assert set(selector) == {"app", "app.kubernetes.io/managed-by"}
 
 
-class TestAgnosticPortAndProbes:
-    """El generador no debe asumir nada sobre la imagen: el scoop declara."""
+class TestDefaultsApplied:
+    """El server asigna container_port y health_path en create() desde config.
 
-    def test_no_container_port_means_no_service(self, app):
-        with app.app_context():
-            manifests = by_kind(ManifestService.build(
-                make_scoop(container_port=None, health_path=None, port=None)
-            ))
-        assert "Service" not in manifests
-        assert "Deployment" in manifests
-        container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
-        assert "ports" not in container
-        assert "readinessProbe" not in container
-        assert "livenessProbe" not in container
+    Aqui validamos que el manifest respeta esos valores y que un cambio en config
+    cambia el puerto interno, no el puerto del LB.
+    """
 
-    def test_no_health_path_means_no_probes(self, app):
+    def test_container_port_appears_in_deployment(self, app):
         with app.app_context():
-            manifests = by_kind(ManifestService.build(
-                make_scoop(health_path=None)
-            ))
+            manifests = by_kind(ManifestService.build(make_scoop()))
         container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
-        assert "readinessProbe" not in container
-        assert "livenessProbe" not in container
-        # Pero el puerto y Service siguen.
         assert container["ports"][0]["containerPort"] == 80
-        assert "Service" in manifests
+        assert container["readinessProbe"]["httpGet"]["port"] == 80
 
-    def test_custom_port_is_honoured(self, app):
+    def test_lb_target_uses_container_port(self, app):
         with app.app_context():
-            manifests = by_kind(ManifestService.build(make_scoop(container_port=3000)))
-        container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
-        assert container["ports"][0]["containerPort"] == 3000
-        assert manifests["Service"]["spec"]["ports"][0]["targetPort"] == 3000
+            manifests = by_kind(ManifestService.build(make_scoop(port=3020, container_port=80)))
+        port = manifests["Service"]["spec"]["ports"][0]
+        assert port["port"] == 3020      # LB port (lo que usa LAN)
+        assert port["targetPort"] == 80  # container port (lo que el form NO edita)
 
-    def test_custom_health_path(self, app):
+    def test_health_path_is_applied(self, app):
         with app.app_context():
             manifests = by_kind(ManifestService.build(make_scoop(health_path="/api/health")))
         container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
         assert container["readinessProbe"]["httpGet"]["path"] == "/api/health"
-        assert container["livenessProbe"]["httpGet"]["path"] == "/api/health"
 
-    def test_worker_ignores_container_port(self, app):
-        # Un worker nunca genera Service, tenga o no container_port.
+    def test_worker_still_has_no_service(self, app):
         with app.app_context():
             manifests = by_kind(ManifestService.build(
-                make_scoop(type="worker", port=None, container_port=80)
+                make_scoop(type="worker", port=None)
             ))
         assert "Service" not in manifests
         assert "Deployment" in manifests

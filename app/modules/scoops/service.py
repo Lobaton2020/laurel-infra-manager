@@ -102,6 +102,8 @@ class ScoopService:
         if ScoopService.get_by_name(data["name"]):
             raise ConflictError(f"Ya existe un scoop llamado '{data['name']}'")
 
+        # El servidor decide container_port y health_path. No los pedimos al usuario
+        # para mantener el form simple: el puerto interno se hereda de config.
         payload = {
             "name": data["name"],
             "application": data["application"],
@@ -121,14 +123,14 @@ class ScoopService:
             "url_registry": data["url_registry"],
             "namespace": data.get("namespace") or current_app.config["DEFAULT_NAMESPACE"],
             "schedule": data.get("schedule"),
-            "container_port": data.get("container_port"),
-            "health_path": data.get("health_path"),
+            "container_port": data.get("container_port") or current_app.config["CONTAINER_PORT"],
+            "health_path": data.get("health_path") or "/",
         }
 
         scoop = Scoop(**payload)
-        # Solo los scoops tipo 'api' con container_port declarado generan Service,
-        # y solo ellos consumen un puerto del pool.
-        if scoop.exposes_service and scoop.container_port:
+        # Todo scoop tipo 'api' consume un puerto del pool: el usuario lo vera
+        # en la respuesta como `port` y es por donde accede desde LAN.
+        if scoop.exposes_service:
             scoop.port = ScoopService.allocate_port()
 
         db.session.add(scoop)

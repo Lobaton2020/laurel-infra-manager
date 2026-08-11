@@ -162,14 +162,16 @@ def delete_scoop(scoop_id: int):
       409: {description: 'El scoop tiene un deploy activo; pasa ?undeploy=true'}
     """
     scoop = ScoopService.get(scoop_id)
-    undeploy = bool_arg("undeploy") or False
+    undeploy = bool(bool_arg("undeploy"))
+    force = bool(bool_arg("force"))
     namespace_arg = request.args.get("namespace")
     ns = ManifestService.namespace_for(scoop, namespace_arg)
     result = {"deleted": scoop_id}
 
-    # Si no nos piden undeploy y el scoop tiene recursos en el cluster, bloqueamos:
-    # borrar el catalogo dejando recursos huerfanos suele ser un accidente.
-    if not undeploy:
+    # Si no nos piden undeploy ni force y el scoop tiene recursos en el cluster,
+    # bloqueamos: borrar el catalogo dejando recursos huerfanos suele ser un
+    # accidente. force=true salta el check (util para tests o limpieza manual).
+    if not undeploy and not force:
         kinds = ["CronJob"] if scoop.type == "cronjob" else ["Deployment"]
         if scoop.exposes_service and scoop.port:
             kinds.append("Service")

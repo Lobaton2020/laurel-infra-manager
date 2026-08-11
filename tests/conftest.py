@@ -48,6 +48,4 @@ def scoop_payload():
         "limit_memory_unit": "M",
         "min_replicas": 1,
         "max_replicas": 3,
-        "container_port": 8080,
-        "health_path": "/health",
     }
