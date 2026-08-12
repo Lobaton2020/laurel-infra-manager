@@ -5,6 +5,8 @@ namespace: prod
 
 resources:
   - ../../base
+  - certificate-api.yml
+  - ingress-api.yml
 
 images:
   - name: aflobaton/laurel-infra-manager

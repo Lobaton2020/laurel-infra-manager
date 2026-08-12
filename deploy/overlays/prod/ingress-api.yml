@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: laurel-api-ingress
+  namespace: prod
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - laurel-api.andreslobaton.top
+      secretName: laurel-api-tls
+  rules:
+    - host: laurel-api.andreslobaton.top
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: laurel-infra-manager
+                port:
+                  number: 3006

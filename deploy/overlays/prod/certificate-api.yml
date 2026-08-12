@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: laurel-api-tls
+  namespace: prod
+spec:
+  secretName: laurel-api-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  dnsNames:
+    - laurel-api.andreslobaton.top
