@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laurel-infra-manager
+  labels:
+    app: laurel-infra-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laurel-infra-manager
+  template:
+    metadata:
+      labels:
+        app: laurel-infra-manager
+    spec:
+      containers:
+        - name: api
+          image: aflobaton/laurel-infra-manager:latest
+          # Always: tag `latest` repintado por el CI; el pod siempre baja la
+          # version mas reciente.
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5002
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            # .env file - montado como archivo desde el Secret `laurel-secrets`,
+            # que contiene una clave `.env` con lineas KEY=VALUE. config.py lo
+            # lee desde /app/.env al arrancar.
+            - name: env-file
+              mountPath: /app/.env
+              subPath: .env
+              readOnly: true
+            # kubeconfig del cluster - Secret aparte, montado en el path que
+            # espera config.py (KUBECONFIG_PATH=./k3s.yaml).
+            - name: kubeconfig
+              mountPath: /app/k3s.yaml
+              subPath: k3s.yaml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 5002
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5002
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "384Mi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: env-file
+          secret:
+            secretName: laurel-secrets
+        - name: kubeconfig
+          secret:
+            secretName: laurel-kubeconfig

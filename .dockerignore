@@ -1,0 +1,25 @@
+# Contexto de build a Docker Hub: nunca subir credenciales ni datos locales.
+
+# Entorno local / secretos
+.env
+.env.local
+*.db
+k3s.yaml
+kubeconfig*
+secrets/
+
+# VCS y tooling
+.git
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+htmlcov/
+.coverage
+tests/
+*.pyc
+*.egg-info/
+
+# Docs despliegue (se genera en CI, no hace falta en el contexto)
+deploy/
+.github/

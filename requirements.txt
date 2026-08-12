@@ -11,4 +11,5 @@ kubernetes>=30.0.0
 pymysql>=1.1.0
 google-auth>=2.36.0
 PyJWT>=2.9.0
+gunicorn>=23.0.0
 pytest>=8.0.0
