@@ -26,6 +26,10 @@ spec:
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
           volumeMounts:
+            # Gunicorn necesita /tmp escribible para el tmp de cada worker;
+            # emptyDir es writable aunque el rootfs sea read-only.
+            - name: tmp
+              mountPath: /tmp
             # .env file - montado como archivo desde el Secret `laurel-secrets`,
             # que contiene una clave `.env` con lineas KEY=VALUE. config.py lo
             # lee desde /app/.env al arrancar.
@@ -72,3 +76,5 @@ spec:
         - name: kubeconfig
           secret:
             secretName: laurel-kubeconfig
+        - name: tmp
+          emptyDir: {}
