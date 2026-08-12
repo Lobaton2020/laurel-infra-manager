@@ -5,11 +5,13 @@ los elimina y reconcilia el `status` del scoop con la realidad del cluster.
 """
 import logging
 
+from flask import current_app
 from kubernetes.client.exceptions import ApiException
 
 from app.core.errors import AppError, ConflictError
 from app.modules.audits.service import AuditService
 from app.modules.cluster.service import K8sService, kind_ops
+from app.modules.dns.service import ClusterDNSError, ClusterDNSService
 from app.modules.scoops.manifest import ManifestService
 from app.modules.scoops.model import STATUS_ACTIVE, STATUS_ERROR, STATUS_PENDING, Scoop
 from app.modules.scoops.service import ScoopService
@@ -37,6 +39,7 @@ class DeployService:
         return {
             "namespace": ns,
             "manifests": ManifestService.build(scoop, namespace),
+            "host": ManifestService.ingress_host(scoop, ns),
         }
 
     @staticmethod
@@ -92,11 +95,43 @@ class DeployService:
              "version": scoop.version},
         )
 
+        # Para scoops 'api' registramos el host en el ConfigMap de CoreDNS del
+        # cluster. Asi el self-check HTTP-01 de cert-manager resuelve a la LAN
+        # desde un pod del cluster y emite el cert sin esperar a un DNS externo.
+        # Si el ConfigMap no existe (cluster sin preparar todavia) seguimos: el
+        # Ingress ya esta creado y la emision del cert tardara mas.
+        #
+        # En /etc/hosts de quien consuma el subdominio hay que agregar la
+        # misma linea a mano: el API corre en un host distinto al equipo del
+        # operador, asi que no tiene sentido tocar ese archivo desde aca.
+        host = ManifestService.ingress_host(scoop, ns)
+        dns_override = "skipped"
+        manual_hosts_lines: list[str] = []
+        if host:
+            try:
+                dns_override = ClusterDNSService.add(
+                    host, current_app.config["DNS_OVERRIDE_LAN_IP"]
+                )
+            except ClusterDNSError as exc:
+                logger.warning(
+                    "DNS override omitido para %s: %s", host, exc)
+                AuditService.log(
+                    "dns_override_warning", "scoop", scoop.id,
+                    {"host": host, "error": str(exc)[:180]},
+                )
+                dns_override = "failed"
+            manual_hosts_lines.append(
+                f"{current_app.config['DNS_OVERRIDE_LAN_IP']}\t{host}"
+            )
+
         return {
             "namespace": ns,
             "dry_run": False,
             "resources": results,
             "port": scoop.port if scoop.exposes_service else None,
+            "host": host,
+            "dns_override": dns_override,
+            "manual_hosts_lines": manual_hosts_lines,
         }
 
     @staticmethod
@@ -111,10 +146,30 @@ class DeployService:
         ]
 
         ScoopService.set_status(scoop, STATUS_PENDING)
+
+        # Liberar la entrada DNS del subdominio en el ConfigMap del cluster.
+        # Si el ConfigMap no esta, no rompemos el undeploy (la BD y el cluster
+        # ya quedan consistentes). La entrada del /etc/hosts del equipo del
+        # operador queda: ese archivo esta fuera del host del API.
+        host = ManifestService.ingress_host(scoop, ns)
+        dns_cleanup = "skipped"
+        if host:
+            try:
+                dns_cleanup = ClusterDNSService.remove(host)
+            except ClusterDNSError as exc:
+                logger.warning(
+                    "No pude limpiar dns override de %s: %s", host, exc)
+
         AuditService.log(
-            "undeploy", "scoop", scoop.id, {"namespace": ns, "resources": results}
+            "undeploy", "scoop", scoop.id,
+            {"namespace": ns, "resources": results, "dns_cleanup": dns_cleanup},
         )
-        return {"namespace": ns, "resources": results}
+        return {
+            "namespace": ns,
+            "resources": results,
+            "host": host,
+            "dns_cleanup": dns_cleanup,
+        }
 
     @staticmethod
     def _workload_kind(scoop: Scoop) -> str:

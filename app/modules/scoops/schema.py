@@ -216,6 +216,28 @@ class ScoopResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @computed_field
+    @property
+    def host(self) -> Optional[str]:
+        """Subdominio publico: `<name>.<INGRESS_BASE_DOMAIN>` o null si no aplica."""
+        if not self._exposes_service or not self.port:
+            return None
+        from flask import current_app
+
+        domain = current_app.config["INGRESS_BASE_DOMAIN"]
+        return f"{self.name}.{domain}"
+
+    @computed_field
+    @property
+    def url(self) -> Optional[str]:
+        """URL https del scoop, o None si no se publica."""
+        host = self.host
+        return f"https://{host}/" if host else None
+
+    @property
+    def _exposes_service(self) -> bool:
+        return self.type == "api"
+
     @classmethod
     def from_scoop(cls, scoop) -> "ScoopResponse":
         req_val, req_unit = to_decimal_megabytes(scoop.requested_memory)

@@ -1,5 +1,24 @@
+from sqlalchemy import or_
+
 from app.core.db import db
 from app.modules.audits.model import Audit
+
+
+def _ilike(column, value: str):
+    """Wrapper para ILIKE con comodines y escapando caracteres especiales del usuario."""
+    safe = value.replace("%", r"\%").replace("_", r"\_")
+    return column.ilike(f"%{safe}%", escape="\\")
+
+
+def _match_expr(query, field: str, value: str):
+    """Devuelve una restriccion OR de busqueda contra el campo pedido.
+
+    Los campos de Audit son columnas simples; para old_data/new_data usamos CAST
+    a string y aplicamos ILIKE sobre la representacion JSON. Asi un termino
+    como 'peva' o '3020' matchea el contenido del snapshot.
+    """
+    col = getattr(Audit, field)
+    return _ilike(col, value)
 
 
 class AuditService:
@@ -20,15 +39,36 @@ class AuditService:
         return audit
 
     @staticmethod
-    def get_all(page: int = 1, limit: int = 50, entity_type: str | None = None) -> dict:
+    def get_all(page: int = 1, limit: int = 50,
+                entity_type: str | None = None,
+                q: str | None = None) -> dict:
+        """Lista de audits con paginacion y filtro `q` que busca en todas las
+        columnas visibles (user_id, action, entity_type, entity_id) y en el
+        contenido de old_data/new_data serializado.
+        """
         query = Audit.query
         if entity_type:
             query = query.filter_by(entity_type=entity_type)
+        if q:
+            term = q.strip()
+            if term:
+                scalar_filters = [
+                    _match_expr(query, "user_id", term),
+                    _match_expr(query, "action", term),
+                    _match_expr(query, "entity_type", term),
+                    _match_expr(query, "entity_id", term),
+                ]
+                # Para los JSON columns: CAST a texto y aplicar ILIKE.
+                data_filters = [
+                    _ilike(db.cast(Audit.old_data, db.String), term),
+                    _ilike(db.cast(Audit.new_data, db.String), term),
+                ]
+                query = query.filter(or_(*scalar_filters, *data_filters))
         query = query.order_by(Audit.created_at.desc(), Audit.id.desc())
 
         total = query.count()
-        pages = (total + limit - 1) // limit
-        items = query.offset((page - 1) * limit).limit(limit).all()
+        pages = (total + limit - 1) // limit if limit else 1
+        items = query.offset((page - 1) * limit).limit(limit).all() if limit else query.all()
 
         return {
             "items": [a.to_dict() for a in items],
@@ -36,6 +76,8 @@ class AuditService:
             "page": page,
             "limit": limit,
             "pages": pages,
+            "q": q or "",
+            "entity_type": entity_type or "",
         }
 
     @staticmethod

@@ -201,6 +201,67 @@ class ManifestService:
         }
 
     @staticmethod
+    def build_ingress(scoop, namespace: str) -> dict:
+        """Publica el Service del scoop bajo su subdominio con TLS automatico.
+
+        Un scoop 'api' con `port` asignado se expone como `<name>.<INGRESS_BASE_DOMAIN>`.
+        El DNS del cluster es un wildcard, asi que esto no requiere registrar nada;
+        cert-manager (cluster-issuer letsencrypt-prod) emite el certificado mediante
+        HTTP-01 apuntando a este Ingress. El secreto TLS es por scoop para que el
+        certificado y su borrado queden ligados al ciclo de vida de la app.
+        """
+        from flask import current_app
+
+        domain = current_app.config["INGRESS_BASE_DOMAIN"]
+        host = f"{scoop.name}.{domain}"
+        issuer = current_app.config["CERT_MANAGER_CLUSTER_ISSUER"]
+        return {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {
+                "name": scoop.name,
+                "namespace": namespace,
+                "labels": ManifestService.labels(scoop),
+                "annotations": {
+                    "cert-manager.io/cluster-issuer": issuer,
+                },
+            },
+            "spec": {
+                "ingressClassName": current_app.config["INGRESS_CLASS"],
+                "rules": [{
+                    "host": host,
+                    "http": {
+                        "paths": [{
+                            "path": "/",
+                            "pathType": "Prefix",
+                            "backend": {
+                                "service": {
+                                    "name": scoop.name,
+                                    "port": {"number": scoop.port},
+                                },
+                            },
+                        }],
+                    },
+                }],
+                # Certificados separados por app: cada scoop tiene su secreto TLS.
+                "tls": [{
+                    "hosts": [host],
+                    "secretName": f"{scoop.name}-tls",
+                }],
+            },
+        }
+
+    @staticmethod
+    def ingress_host(scoop, namespace: str | None = None) -> str | None:
+        """Subdominio publico del scoop, o None si no se publica (worker/cronjob)."""
+        if not scoop.exposes_service or not scoop.port:
+            return None
+        from flask import current_app
+
+        domain = current_app.config["INGRESS_BASE_DOMAIN"]
+        return f"{scoop.name}.{domain}"
+
+    @staticmethod
     def build(scoop, namespace: str | None = None) -> list[dict]:
         """Manifiestos en orden de aplicacion (dependencias primero)."""
         ns = ManifestService.namespace_for(scoop, namespace)
@@ -213,6 +274,11 @@ class ManifestService:
         # Todo scoop tipo 'api' genera Service: el container_port lo fija el server.
         if scoop.exposes_service:
             manifests.append(ManifestService.build_service(scoop, ns))
+
+        # Y su Ingress con subdominio propio + TLS (LetsEncrypt via cert-manager).
+        # Solo aplica a 'api': un Service sin port no tiene backend que publicar.
+        if scoop.exposes_service and scoop.port:
+            manifests.append(ManifestService.build_ingress(scoop, ns))
 
         # Sin margen de escalado un HPA no aporta nada y ademas pelearia con replicas.
         if scoop.max_replicas > scoop.min_replicas:

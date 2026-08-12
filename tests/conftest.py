@@ -9,8 +9,9 @@ class TestConfig(Config):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     DEFAULT_NAMESPACE = "prod"
-    INGRESS_BASE_DOMAIN = "andrelobaton.top"
+    INGRESS_BASE_DOMAIN = "andreslobaton.top"
     INGRESS_CLASS = "traefik"
+    CERT_MANAGER_CLUSTER_ISSUER = "letsencrypt-prod"
     CONTAINER_PORT = 8080
     SERVICE_PORT_RANGE_START = 3000
     SERVICE_PORT_RANGE_END = 3005  # rango corto para poder probar el agotamiento

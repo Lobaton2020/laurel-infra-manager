@@ -175,6 +175,7 @@ def delete_scoop(scoop_id: int):
         kinds = ["CronJob"] if scoop.type == "cronjob" else ["Deployment"]
         if scoop.exposes_service and scoop.port:
             kinds.append("Service")
+            kinds.append("Ingress")
         deployed = []
         for kind in kinds:
             try:

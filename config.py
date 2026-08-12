@@ -33,6 +33,27 @@ class Config:
     SERVICE_PORT_RANGE_END = int(os.environ.get("SERVICE_PORT_RANGE_END", 3999))
     HPA_TARGET_CPU = int(os.environ.get("HPA_TARGET_CPU", 80))
 
+    # --- Subdominio publico (Traefik + cert-manager) ---
+    # El DNS del cluster es un wildcard (*.andreslobaton.top → 192.168.20.240),
+    # asi que crear el Ingress basta para publicar el scoop: ningun
+    # registro DNS manual. cert-manager emite el certificado LetsEncrypt
+    # (HTTP-01) apuntando a este Ingress.
+    INGRESS_BASE_DOMAIN = os.environ.get("INGRESS_BASE_DOMAIN", "andreslobaton.top")
+    INGRESS_CLASS = os.environ.get("INGRESS_CLASS", "traefik")
+    CERT_MANAGER_CLUSTER_ISSUER = os.environ.get("CERT_MANAGER_CLUSTER_ISSUER", "letsencrypt-prod")
+
+    # --- Override DNS interno (cert-manager HTTP-01 self-check) ---
+    # K3s descubre zonas por /etc/hosts del nodo y genera bloques automáticos.
+    # Para que un subdominio nuevo resuelva dentro del cluster a la IP LAN
+    # (necesario para que cert-manager complete el HTTP-01 self-check), usamos
+    # un ConfigMap importado por CoreDNS (`import /etc/coredns/custom/*.server`).
+    # El API parchea ese ConfigMap en cada deploy para que el entry exista.
+    DNS_OVERRIDE_CM_NAME = os.environ.get("DNS_OVERRIDE_CM_NAME", "coredns-custom")
+    DNS_OVERRIDE_CM_NAMESPACE = os.environ.get("DNS_OVERRIDE_CM_NAMESPACE", "kube-system")
+    DNS_OVERRIDE_FILE = os.environ.get("DNS_OVERRIDE_FILE", "andreslobaton.server")
+    DNS_OVERRIDE_LAN_IP = os.environ.get("DNS_OVERRIDE_LAN_IP", "192.168.20.240")
+    DNS_OVERRIDE_ZONE = os.environ.get("DNS_OVERRIDE_ZONE", "andreslobaton.top")
+
     # --- Base de datos ---
     DB_TYPE = os.environ.get("DB_TYPE", "sqlite")
 
