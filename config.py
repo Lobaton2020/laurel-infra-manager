@@ -15,6 +15,24 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-prod")
     API_PREFIX = API_PREFIX
 
+    # --- Auth (Google Sign-In + JWT propio) ---
+    # Google emite el id_token en el popup; el backend lo verifica y firma un
+    # JWT local (HS256, SECRET_KEY) que el front envia en `Authorization: Bearer`.
+    GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+    JWT_TTL_HOURS = int(os.environ.get("JWT_TTL_HOURS", "24"))
+    JWT_ALGORITHM = "HS256"
+    # Devolvemos el token en JSON (no usamos cookie httpOnly porque el login es
+    # cross-origin y el front vive en otro host). En produccion se puede migrar
+    # a cookie httpOnly sin tocar la API.
+    AUTH_ALLOWED_ORIGINS = [
+        o.strip()
+        for o in os.environ.get(
+            "AUTH_ALLOWED_ORIGINS",
+            "http://localhost:5173,http://192.168.20.240:5173",
+        ).split(",")
+        if o.strip()
+    ]
+
     # --- Cluster K3s (ver K3S_CONTEXT.md) ---
     KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", str(BASE_DIR / "k3s.yaml"))
     # Al reiniciar K3s el kubeconfig vuelve a 127.0.0.1; se corrige en caliente con este valor.

@@ -1,0 +1,1 @@
+"""Submodulo de records del Configurator."""

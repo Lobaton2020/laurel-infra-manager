@@ -12,16 +12,19 @@ logger = logging.getLogger(__name__)
 class AppError(Exception):
     """Error de negocio con codigo HTTP explicito."""
 
-    def __init__(self, message: str, status_code: int = 400, details=None):
+    def __init__(self, message: str, status_code: int = 400, details=None, reason: str | None = None):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.details = details
+        self.reason = reason
 
     def to_dict(self) -> dict:
         payload = {"error": self.message}
         if self.details:
             payload["details"] = self.details
+        if self.reason:
+            payload["reason"] = self.reason
         return payload
 
 

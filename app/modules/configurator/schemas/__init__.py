@@ -1,0 +1,1 @@
+"""Submodulo de schemas del Configurator."""

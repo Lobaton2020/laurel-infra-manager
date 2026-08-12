@@ -1,11 +1,12 @@
 import logging
 
 from flasgger import Swagger
-from flask import Flask
+from flask import Flask, request
 from flask_cors import CORS
 
+from app.core.auth import authenticate_request
 from app.core.db import db
-from app.core.errors import register_error_handlers
+from app.core.errors import AppError, register_error_handlers
 from config import Config
 
 SWAGGER_TEMPLATE = {
@@ -48,20 +49,35 @@ def create_app(config_class=Config) -> Flask:
 
     # Importar los modelos antes de create_all para que se registren en el metadata.
     from app.modules.audits.model import Audit  # noqa: F401
+    from app.modules.configurator.records.model import Record  # noqa: F401
+    from app.modules.configurator.schemas.model import Column, Schema  # noqa: F401
+    from app.modules.users.model import User  # noqa: F401
     from app.modules.scoops.model import Scoop  # noqa: F401
 
     with app.app_context():
         db.create_all()
+        # Seed del configurator: idempotente, solo llena la tabla si esta vacia.
+        from app.modules.configurator.seed import seed_configurator
+        seed_configurator()
 
     Swagger(app, template=SWAGGER_TEMPLATE)
 
     # Un blueprint por modulo, mas el de health (infraestructura, vive en core).
     from app.core.health import bp as health_bp
+    from app.modules.auth import bp as auth_bp
     from app.modules.audits import bp as audits_bp
     from app.modules.cluster import bp as cluster_bp
+    from app.modules.configurator import bp as configurator_bp
     from app.modules.scoops import bp as scoops_bp
 
-    for blueprint in (health_bp, scoops_bp, cluster_bp, audits_bp):
+    # CORS restringido a los origins del front; mandamos Bearer en header
+    # (no usamos cookies), por eso no hace falta supports_credentials=True.
+    origins = app.config.get("AUTH_ALLOWED_ORIGINS") or ["*"]
+    CORS(app, resources={r"/api/*": {"origins": origins}}, supports_credentials=False)
+
+    app.before_request(authenticate_request)
+
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, scoops_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)

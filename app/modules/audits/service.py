@@ -4,6 +4,28 @@ from app.core.db import db
 from app.modules.audits.model import Audit
 
 
+def _current_user_email() -> str:
+    """Devuelve el `email` del usuario autenticado; si no hay email, el `sub`;
+    si no hay request autenticado, 'unknown'.
+
+    Se guarda el email en vez del id para que la auditoria sea legible por una
+    persona (quien hizo que). Permite que AuditService.log se use tanto en
+    endpoints protegidos (donde `g.user` existe) como en sitios donde no hay
+    contexto de auth (tests, helpers internos).
+    """
+    try:
+        from flask import g
+        user = getattr(g, "user", None)
+        if user:
+            if user.get("email"):
+                return str(user["email"])
+            if user.get("sub"):
+                return str(user["sub"])
+    except RuntimeError:
+        pass
+    return "unknown"
+
+
 def _ilike(column, value: str):
     """Wrapper para ILIKE con comodines y escapando caracteres especiales del usuario."""
     safe = value.replace("%", r"\%").replace("_", r"\_")
@@ -25,7 +47,9 @@ class AuditService:
 
     @staticmethod
     def log(action: str, entity_type: str, entity_id, new_data: dict | None = None,
-            old_data: dict | None = None, user_id: str = "unknown") -> Audit:
+            old_data: dict | None = None, user_id: str | None = None) -> Audit:
+        if user_id is None:
+            user_id = _current_user_email()
         audit = Audit(
             user_id=user_id,
             action=action,

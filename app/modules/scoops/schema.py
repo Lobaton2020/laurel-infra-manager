@@ -85,9 +85,13 @@ class ScoopBase(BaseModel):
     # la sintaxis K8s. Almacenamos siempre el string equivalente en BD.
     requested_memory_value: int = Field(128, ge=1, le=999999)
     requested_memory_unit: MemoryUnit = "M"
+    # Alternativa: la cantidad K8s completa ("128Mi", "1Gi"). Si llega, se guarda
+    # tal cual y tiene precedencia sobre value+unit.
+    requested_memory: Optional[str] = None
     limit_vcpu: str = "500m"
     limit_memory_value: int = Field(512, ge=1, le=999999)
     limit_memory_unit: MemoryUnit = "M"
+    limit_memory: Optional[str] = None
 
     min_replicas: int = Field(1, ge=0, le=100)
     max_replicas: int = Field(1, ge=1, le=100)
@@ -116,6 +120,11 @@ class ScoopBase(BaseModel):
     @classmethod
     def _v_cpu(cls, v: str) -> str:
         return _validate_cpu_quantity(v)
+
+    @field_validator("requested_memory", "limit_memory")
+    @classmethod
+    def _v_mem(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_memory_quantity(v) if v is not None else v
 
     @model_validator(mode="after")
     def validate_consistency(self):
@@ -150,9 +159,11 @@ class ScoopUpdate(BaseModel):
     requested_vcpu: Optional[str] = None
     requested_memory_value: Optional[int] = Field(None, ge=1, le=999999)
     requested_memory_unit: Optional[MemoryUnit] = None
+    requested_memory: Optional[str] = None
     limit_vcpu: Optional[str] = None
     limit_memory_value: Optional[int] = Field(None, ge=1, le=999999)
     limit_memory_unit: Optional[MemoryUnit] = None
+    limit_memory: Optional[str] = None
 
     min_replicas: Optional[int] = Field(None, ge=0, le=100)
     max_replicas: Optional[int] = Field(None, ge=1, le=100)
@@ -168,6 +179,11 @@ class ScoopUpdate(BaseModel):
     @classmethod
     def _v_cpu(cls, v: Optional[str]) -> Optional[str]:
         return _validate_cpu_quantity(v) if v is not None else v
+
+    @field_validator("requested_memory", "limit_memory")
+    @classmethod
+    def _v_mem(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_memory_quantity(v) if v is not None else v
 
     @model_validator(mode="after")
     def validate_replicas(self):

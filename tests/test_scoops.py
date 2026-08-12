@@ -155,6 +155,24 @@ class TestReadUpdateDelete:
         assert data["application"] == "portafolio-web"
         assert data["port"] == created["port"]
 
+    def test_update_memory_quantity_string(self, client, scoop_payload):
+        created = client.post("/api/scoops", json=scoop_payload).get_json()
+        response = client.put(
+            f"/api/scoops/{created['id']}",
+            json={"requested_memory": "256Mi", "limit_memory": "1Gi"},
+        )
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["requested_memory"] == "256Mi"
+        assert data["limit_memory"] == "1Gi"
+        # value+unit siguen siendo el soporte legacy para editar memoria.
+        response = client.put(
+            f"/api/scoops/{created['id']}",
+            json={"requested_memory_value": 512, "requested_memory_unit": "M"},
+        )
+        assert response.status_code == 200
+        assert response.get_json()["requested_memory"] == "512M"
+
     def test_delete(self, client, scoop_payload):
         created = client.post("/api/scoops", json=scoop_payload).get_json()
         # `force=true` salta el check de "deploy activo" (el cluster puede tener un

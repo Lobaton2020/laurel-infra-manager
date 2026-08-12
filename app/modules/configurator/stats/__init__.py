@@ -1,0 +1,1 @@
+"""Submodulo de estadisticas del Configurator."""

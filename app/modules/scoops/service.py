@@ -112,10 +112,10 @@ class ScoopService:
             "is_productive": data.get("is_productive", False),
             "requested_vcpu": data.get("requested_vcpu", "100m"),
             "limit_vcpu": data.get("limit_vcpu", "500m"),
-            "requested_memory": format_memory(
+            "requested_memory": data.get("requested_memory") or format_memory(
                 data["requested_memory_value"], data.get("requested_memory_unit", "M")
             ),
-            "limit_memory": format_memory(
+            "limit_memory": data.get("limit_memory") or format_memory(
                 data["limit_memory_value"], data.get("limit_memory_unit", "M")
             ),
             "min_replicas": data.get("min_replicas", 1),
@@ -159,8 +159,12 @@ class ScoopService:
             if data.get(field) is not None:
                 setattr(scoop, field, data[field])
 
-        # Memoria: reconstruimos el string si llega value o unit.
+        # Memoria: acepta la cantidad completa ("128Mi") o value+unit suelto.
         for prefix in ("requested_memory", "limit_memory"):
+            raw = data.get(prefix)
+            if raw:
+                setattr(scoop, prefix, raw)
+                continue
             mem = _memory_from_payload(data, prefix)
             if mem is not None:
                 setattr(scoop, prefix, format_memory(mem[0], mem[1]))

@@ -21,3 +21,5 @@ kubeconfig*
 .vscode/
 .DS_Store
 *.swp
+
+# Frontend (ahora vive en configurator-lob/frontend, repositorio aparte)
