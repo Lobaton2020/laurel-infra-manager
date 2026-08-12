@@ -68,7 +68,15 @@ class DeployService:
                     K8sService.replace(kind, ns, name, manifest, dry_run=dry_run)
                     action = "updated"
                 else:
-                    K8sService.create(kind, ns, manifest, dry_run=dry_run)
+                    try:
+                        K8sService.create(kind, ns, manifest, dry_run=dry_run)
+                    except ApiException as exc:
+                        # 409 en el create: una carrera (p.ej. el ingress-shim de
+                        # cert-manager creando su propio Certificate) gano al check
+                        # de exists(). Tratar el recurso como existente y parchear.
+                        if exc.status != 409:
+                            raise
+                        K8sService.replace(kind, ns, name, manifest, dry_run=dry_run)
                     action = "created"
             except ApiException as exc:
                 # El despliegue queda a medias a proposito: revertir parcialmente seria
