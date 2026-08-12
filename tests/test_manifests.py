@@ -97,7 +97,7 @@ class TestApiScoop:
         assert path["pathType"] == "Prefix"
         assert path["backend"]["service"]["name"] == "manejo-finanzas"
         assert path["backend"]["service"]["port"]["number"] == 3001
-        assert ingress["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == "letsencrypt-prod"
+        assert "cert-manager.io/cluster-issuer" not in ingress["metadata"].get("annotations", {})
         assert ingress["spec"]["tls"][0]["hosts"] == ["manejo-finanzas.andreslobaton.top"]
         assert ingress["spec"]["tls"][0]["secretName"] == "manejo-finanzas-tls"
 

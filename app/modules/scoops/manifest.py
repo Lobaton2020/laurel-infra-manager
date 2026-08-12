@@ -202,19 +202,19 @@ class ManifestService:
 
     @staticmethod
     def build_ingress(scoop, namespace: str) -> dict:
-        """Publica el Service del scoop bajo su subdominio con TLS automatico.
+        """Publica el Service del scoop bajo su subdominio.
 
         Un scoop 'api' con `port` asignado se expone como `<name>.<INGRESS_BASE_DOMAIN>`.
-        El DNS del cluster es un wildcard, asi que esto no requiere registrar nada;
-        cert-manager (cluster-issuer letsencrypt-prod) emite el certificado mediante
-        HTTP-01 apuntando a este Ingress. El secreto TLS es por scoop para que el
-        certificado y su borrado queden ligados al ciclo de vida de la app.
+        El DNS del cluster es un wildcard, asi que esto no requiere registrar nada.
+        El Certificate TLS se crea como recurso aparte (build_certificate), por lo
+        que aqui NO ponemos la anotacion cert-manager.io/cluster-issuer: con ella
+        el ingress-shim crearia su propio Certificate con el mismo nombre y
+        colisionaria con el nuestro (409 already exists).
         """
         from flask import current_app
 
         domain = current_app.config["INGRESS_BASE_DOMAIN"]
         host = f"{scoop.name}.{domain}"
-        issuer = current_app.config["CERT_MANAGER_CLUSTER_ISSUER"]
         return {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "Ingress",
@@ -222,9 +222,6 @@ class ManifestService:
                 "name": scoop.name,
                 "namespace": namespace,
                 "labels": ManifestService.labels(scoop),
-                "annotations": {
-                    "cert-manager.io/cluster-issuer": issuer,
-                },
             },
             "spec": {
                 "ingressClassName": current_app.config["INGRESS_CLASS"],
