@@ -184,6 +184,103 @@ class DeployService:
         return "CronJob" if scoop.type == "cronjob" else "Deployment"
 
     @staticmethod
+    def certificate_status(scoop: Scoop, namespace: str | None = None) -> dict:
+        """Estado del Certificate TLS del scoop (generacion de LetsEncrypt)."""
+        ns = ManifestService.namespace_for(scoop, namespace)
+        host = ManifestService.ingress_host(scoop, ns)
+        if not host:
+            return {"host": None, "certificate": None,
+                    "message": "Este scoop no publica subdominio (sin TLS)"}
+
+        cert_name = f"{scoop.name}-tls"
+        cert = K8sService.get_certificate(ns, cert_name)
+
+        if cert is None:
+            return {
+                "host": host,
+                "certificate": None,
+                "message": f"No hay Certificate '{cert_name}' en '{ns}'. "
+                           "Desplega el scoop para generarlo.",
+            }
+
+        status = cert.get("status") or {}
+        conditions = status.get("conditions") or []
+        ready_condition = next(
+            (c for c in conditions if c.get("type") == "Ready"), None
+        )
+        secret_exists = K8sService.secret_exists(ns, cert_name)
+
+        requests = K8sService.list_certificate_requests(ns, cert_name)
+        latest_request = None
+        if requests:
+            req = requests[-1]
+            latest_request = {
+                "name": req["metadata"]["name"],
+                "conditions": [
+                    {"type": c.get("type"), "status": c.get("status"),
+                     "reason": c.get("reason"), "message": c.get("message")}
+                    for c in (req.get("status") or {}).get("conditions") or []
+                ],
+            }
+
+        challenges = K8sService.list_challenges(ns, host)
+        challenge_summary = [
+            {
+                "name": c["metadata"]["name"],
+                "dns_name": c.get("spec", {}).get("dnsName"),
+                "state": c.get("status", {}).get("state"),
+                "reason": c.get("status", {}).get("reason"),
+                "message": c.get("status", {}).get("message"),
+            }
+            for c in challenges
+        ]
+
+        return {
+            "host": host,
+            "certificate": {
+                "name": cert_name,
+                "secret_name": cert_name,
+                "secret_exists": secret_exists,
+                "ready": ready_condition.get("status") == "True" if ready_condition else False,
+                "condition": {
+                    "type": (ready_condition or {}).get("type"),
+                    "status": (ready_condition or {}).get("status"),
+                    "reason": (ready_condition or {}).get("reason"),
+                    "message": (ready_condition or {}).get("message"),
+                },
+            },
+            "certificate_request": latest_request,
+            "challenges": challenge_summary,
+            "events": K8sService.certificate_events(ns, cert_name),
+            "message": "Certificado TLS emitido" if (ready_condition or {}).get("status") == "True"
+                       else "Certificado en proceso de emision o con errores",
+        }
+
+    @staticmethod
+    def certificate_logs(scoop: Scoop, namespace: str | None = None,
+                         tail_lines: int = 100) -> dict:
+        """Logs del controller de cert-manager filtrados por el certificado del scoop."""
+        cert_name = f"{scoop.name}-tls"
+        needles = (cert_name, scoop.name)
+
+        pods = K8sService.list_cert_manager_pods()
+        entries = []
+        for pod in pods:
+            try:
+                logs = K8sService.pod_logs_in(
+                    "cert-manager", pod, tail_lines=tail_lines,
+                )
+            except Exception:
+                continue
+            lines = [
+                ln for ln in logs.splitlines()
+                if any(n in ln for n in needles)
+            ]
+            if lines:
+                entries.append({"pod": pod, "logs": "\n".join(lines[-tail_lines:])})
+        return {"namespace": "cert-manager", "certificate": cert_name, "pods": entries}
+
+    @staticmethod
     def status(scoop: Scoop, namespace: str | None = None) -> dict:
         """Contrasta el catalogo con el cluster y persiste el status resultante."""
         ns = ManifestService.namespace_for(scoop, namespace)

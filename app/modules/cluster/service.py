@@ -290,6 +290,111 @@ class K8sService:
         clients = get_clients()
         return clients.serialize(clients.networking.read_namespaced_ingress(name, namespace))
 
+    # ---------- Certificados (cert-manager CRDs) ----------
+
+    @staticmethod
+    def get_certificate(namespace: str, name: str) -> dict | None:
+        """Lee un Certificate de cert-manager. None si no existe."""
+        clients = get_clients()
+        try:
+            return clients.custom.get_namespaced_custom_object(
+                "cert-manager.io", "v1", namespace, "certificates", name
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    @staticmethod
+    def list_certificate_requests(namespace: str, cert_name: str) -> list[dict]:
+        """CertificateRequests de un Certificate (label cert-manager.io/certificate-name)."""
+        clients = get_clients()
+        try:
+            items = clients.custom.list_namespaced_custom_object(
+                "cert-manager.io", "v1", namespace, "certificaterequests",
+                label_selector=f"cert-manager.io/certificate-name={cert_name}",
+            ).get("items", [])
+        except ApiException as exc:
+            if exc.status == 404:
+                return []
+            raise
+        return sorted(items, key=lambda c: c["metadata"].get("creationTimestamp", ""))
+
+    @staticmethod
+    def list_challenges(namespace: str, host: str) -> list[dict]:
+        """Retos ACME (HTTP-01) en curso del host.
+
+        El API group `acme.cert-manager.io` solo existe si cert-manager esta
+        instalado con el controller ACME; si no, el CRD no existe y devolvemos
+        vacio en vez de romper la respuesta del certificado.
+        """
+        clients = get_clients()
+        try:
+            items = clients.custom.list_namespaced_custom_object(
+                "acme.cert-manager.io", "v1", namespace, "challenges",
+            ).get("items", [])
+        except ApiException:
+            return []
+        return [c for c in items if host in (c.get("spec", {}).get("dnsName", ""))]
+
+    @staticmethod
+    def secret_exists(namespace: str, name: str) -> bool:
+        try:
+            get_clients().core.read_namespaced_secret(name, namespace)
+            return True
+        except ApiException as exc:
+            if exc.status == 404:
+                return False
+            raise
+
+    @staticmethod
+    def certificate_events(namespace: str, cert_name: str) -> list[dict]:
+        """Eventos del objeto Certificate (informativos; fallos no rompen)."""
+        clients = get_clients()
+        try:
+            items = clients.core.list_namespaced_event(
+                namespace,
+                field_selector=f"involvedObject.name={cert_name}",
+            ).items
+        except ApiException:
+            return []
+        return [
+            {
+                "type": e.type,
+                "reason": e.reason,
+                "message": e.message,
+                "count": e.count,
+                "last": e.last_timestamp.isoformat() if e.last_timestamp else None,
+            }
+            for e in items
+        ]
+
+    @staticmethod
+    def list_cert_manager_pods() -> list[str]:
+        """Nombres de los pods del controller de cert-manager (para logs de emision)."""
+        clients = get_clients()
+        for ns in ("cert-manager", "kube-system"):
+            try:
+                items = clients.core.list_namespaced_pod(ns).items
+            except ApiException:
+                continue
+            pods = [
+                p.metadata.name
+                for p in items
+                if "cert-manager" in p.metadata.name
+                and "webhook" not in p.metadata.name
+                and "cainjector" not in p.metadata.name
+            ]
+            if pods:
+                return pods
+        return []
+
+    @staticmethod
+    def pod_logs_in(namespace: str, pod: str, tail_lines: int = 100) -> str:
+        return get_clients().core.read_namespaced_pod_log(
+            pod, namespace, tail_lines=tail_lines
+        )
+
     # ---------- CRUD generico por kind ----------
 
     @staticmethod

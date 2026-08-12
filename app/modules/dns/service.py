@@ -75,6 +75,40 @@ class ClusterDNSService:
         clients.core.replace_namespaced_config_map(name, namespace, cm)
         logger.info("ConfigMap '%s/%s' actualizado", namespace, name)
 
+        # CoreDNS cachea el ConfigMap y no lo relee solo: sin este restart el
+        # host nuevo no resuelve y el HTTP-01 de cert-manager falla (el cert
+        # nunca se emite). Es el mismo paso manual que documentamos para el
+        # operador, automatizado.
+        ClusterDNSService._restart_coredns()
+
+    @staticmethod
+    def _restart_coredns() -> None:
+        from flask import current_app
+
+        clients = get_clients()
+        namespace = current_app.config["DNS_OVERRIDE_CM_NAMESPACE"]
+        try:
+            clients.apps.patch_namespaced_deployment(
+                "coredns", namespace, {
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "laurel/dns-restarted":
+                                        f"{__import__('time').time():.0f}",
+                                },
+                            },
+                        },
+                    },
+                }
+            )
+            logger.info("Deployment 'coredns' reiniciado para tomar el DNS nuevo")
+        except ApiException as exc:
+            raise ClusterDNSError(
+                f"No pude reiniciar CoreDNS (puede que el host no resuelva hasta "
+                f"el proximo reload): {exc.reason or exc}"
+            ) from exc
+
     # ---------- parseo / render ----------
 
     _HOSTS_RE = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+([A-Za-z0-9._-]+)\s*$")

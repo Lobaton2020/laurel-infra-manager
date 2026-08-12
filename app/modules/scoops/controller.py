@@ -304,6 +304,40 @@ def scoop_logs(scoop_id: int):
     ))
 
 
+@bp.get("/<int:scoop_id>/certificate")
+def scoop_certificate(scoop_id: int):
+    """Estado de la generacion del certificado TLS del scoop
+    ---
+    tags: [Scoops]
+    parameters:
+      - {name: scoop_id, in: path, required: true, type: integer}
+      - {name: namespace, in: query, type: string}
+    responses:
+      200: {description: Estado del Certificate y retos ACME}
+    """
+    scoop = ScoopService.get(scoop_id)
+    return jsonify(DeployService.certificate_status(
+        scoop, request.args.get("namespace")
+    ))
+
+
+@bp.get("/<int:scoop_id>/certificate/logs")
+def scoop_certificate_logs(scoop_id: int):
+    """Logs del controller de cert-manager para el certificado del scoop
+    ---
+    tags: [Scoops]
+    parameters:
+      - {name: scoop_id, in: path, required: true, type: integer}
+      - {name: tail_lines, in: query, type: integer, default: 100}
+    responses:
+      200: {description: Logs filtrados por certificado}
+    """
+    scoop = ScoopService.get(scoop_id)
+    return jsonify(DeployService.certificate_logs(
+        scoop, tail_lines=request.args.get("tail_lines", 100, type=int)
+    ))
+
+
 @bp.get("/<int:scoop_id>/audits")
 def scoop_audits(scoop_id: int):
     """Historial de cambios del scoop
