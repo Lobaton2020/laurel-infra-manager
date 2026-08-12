@@ -18,9 +18,47 @@ _KIND_MAP = {
     "CronJob": ("batch", "cron_job"),
 }
 
+# CRDs de cert-manager: kind -> (group, version, plural)
+_CRD_MAP = {
+    "Certificate": ("cert-manager.io", "v1", "certificates"),
+}
+
+
+def _crd_ops(kind: str):
+    """Devuelve (read, create, patch, delete) para un CRD, adaptados a la
+    misma firma que los kinds tipados de _KIND_MAP."""
+    import functools
+
+    group, version, plural = _CRD_MAP[kind]
+    clients = get_clients()
+
+    def read(name, namespace):
+        return clients.custom.get_namespaced_custom_object(
+            group, version, namespace, plural, name
+        )
+
+    def create(namespace, manifest, **kwargs):
+        return clients.custom.create_namespaced_custom_object(
+            group, version, namespace, plural, manifest, **kwargs
+        )
+
+    def replace(name, namespace, manifest, **kwargs):
+        return clients.custom.replace_namespaced_custom_object(
+            group, version, namespace, plural, name, manifest, **kwargs
+        )
+
+    def delete(name, namespace):
+        return clients.custom.delete_namespaced_custom_object(
+            group, version, namespace, plural, name
+        )
+
+    return (read, create, replace, delete)
+
 
 def kind_ops(kind: str):
     """Devuelve (read, create, patch, delete) para un kind soportado."""
+    if kind in _CRD_MAP:
+        return _crd_ops(kind)
     api_attr, suffix = _KIND_MAP[kind]
     api = getattr(get_clients(), api_attr)
     return (

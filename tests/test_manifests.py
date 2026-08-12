@@ -46,8 +46,8 @@ class TestApiScoop:
         with app.app_context():
             return by_kind(ManifestService.build(make_scoop()))
 
-    def test_generates_deployment_service_and_ingress(self, manifests):
-        assert set(manifests) == {"Deployment", "Service", "Ingress"}
+    def test_generates_deployment_service_ingress_and_certificate(self, manifests):
+        assert set(manifests) == {"Deployment", "Service", "Ingress", "Certificate"}
 
     def test_image_is_url_registry_verbatim(self, manifests):
         container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
@@ -100,6 +100,17 @@ class TestApiScoop:
         assert ingress["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == "letsencrypt-prod"
         assert ingress["spec"]["tls"][0]["hosts"] == ["manejo-finanzas.andreslobaton.top"]
         assert ingress["spec"]["tls"][0]["secretName"] == "manejo-finanzas-tls"
+
+    def test_certificate_requests_tls_for_scoop_host(self, manifests):
+        cert = manifests["Certificate"]
+        assert cert["apiVersion"] == "cert-manager.io/v1"
+        assert cert["metadata"]["name"] == "manejo-finanzas-tls"
+        assert cert["spec"]["secretName"] == "manejo-finanzas-tls"
+        assert cert["spec"]["issuerRef"] == {
+            "kind": "ClusterIssuer",
+            "name": "letsencrypt-prod",
+        }
+        assert cert["spec"]["dnsNames"] == ["manejo-finanzas.andreslobaton.top"]
 
     def test_selector_is_stable_subset_of_labels(self, manifests):
         selector = manifests["Deployment"]["spec"]["selector"]["matchLabels"]

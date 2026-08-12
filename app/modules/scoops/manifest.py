@@ -252,6 +252,39 @@ class ManifestService:
         }
 
     @staticmethod
+    def build_certificate(scoop, namespace: str) -> dict:
+        """Certificado Let's Encrypt explicito para el host del scoop.
+
+        Se crea como recurso Certificate propio (mismo patron que el resto de
+        apps del cluster) en lugar de depender del ingress-shim de cert-manager:
+        asi la emision del certificado no queda condicionada a que ese controller
+        traduzca la anotacion del Ingress.
+        """
+        from flask import current_app
+
+        host = ManifestService.ingress_host(scoop, namespace)
+        if not host:
+            raise ValueError("Un scoop sin host publico no puede tener certificado")
+        issuer = current_app.config["CERT_MANAGER_CLUSTER_ISSUER"]
+        return {
+            "apiVersion": "cert-manager.io/v1",
+            "kind": "Certificate",
+            "metadata": {
+                "name": f"{scoop.name}-tls",
+                "namespace": namespace,
+                "labels": ManifestService.labels(scoop),
+            },
+            "spec": {
+                "secretName": f"{scoop.name}-tls",
+                "issuerRef": {
+                    "kind": "ClusterIssuer",
+                    "name": issuer,
+                },
+                "dnsNames": [host],
+            },
+        }
+
+    @staticmethod
     def ingress_host(scoop, namespace: str | None = None) -> str | None:
         """Subdominio publico del scoop, o None si no se publica (worker/cronjob)."""
         if not scoop.exposes_service or not scoop.port:
@@ -279,6 +312,8 @@ class ManifestService:
         # Solo aplica a 'api': un Service sin port no tiene backend que publicar.
         if scoop.exposes_service and scoop.port:
             manifests.append(ManifestService.build_ingress(scoop, ns))
+            # Certificado TLS explicito: no dependemos del ingress-shim.
+            manifests.append(ManifestService.build_certificate(scoop, ns))
 
         # Sin margen de escalado un HPA no aporta nada y ademas pelearia con replicas.
         if scoop.max_replicas > scoop.min_replicas:

@@ -34,6 +34,7 @@ class K8sClients:
         self.autoscaling = k8s_client.AutoscalingV2Api(self.api_client)
         self.batch = k8s_client.BatchV1Api(self.api_client)
         self.version = k8s_client.VersionApi(self.api_client)
+        self.custom = k8s_client.CustomObjectsApi(self.api_client)
 
     @property
     def host(self) -> str:
