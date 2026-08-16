@@ -296,10 +296,19 @@ class ManifestService:
         """Manifiestos en orden de aplicacion (dependencias primero)."""
         ns = ManifestService.namespace_for(scoop, namespace)
 
+        # Inyeccion best-effort: si en el namespace hay un ConfigMap/Secret
+        # vinculado a esta app (label <LABEL_PREFIX>/app=<application>), se monta
+        # en el contenedor via envFrom. Si el cluster no responde, seguimos:
+        # los manifiestos deben poder generarse sin dependencias externas.
+        env_from = ManifestService._inject_app_env_from(scoop, ns)
+
         if scoop.type == "cronjob":
-            return [ManifestService.build_cronjob(scoop, ns)]
+            manifest = ManifestService.build_cronjob(scoop, ns)
+            ManifestService._apply_env_from(manifest, env_from)
+            return [manifest]
 
         manifests = [ManifestService.build_deployment(scoop, ns)]
+        ManifestService._apply_env_from(manifests[0], env_from)
 
         # Todo scoop tipo 'api' genera Service: el container_port lo fija el server.
         if scoop.exposes_service:
@@ -317,3 +326,66 @@ class ManifestService:
             manifests.append(ManifestService.build_hpa(scoop, ns))
 
         return manifests
+
+    @staticmethod
+    def _apply_env_from(manifest: dict, env_from: list[dict]) -> None:
+        """Agrega entradas `envFrom` a todos los containers del manifest.
+
+        Modifica el manifest in-place: lo hace `build` para no devolver una
+        segunda copia. Si el manifest no tiene containers (no aplica), se ignora.
+        """
+        if not env_from:
+            return
+        spec = manifest.get("spec", {})
+        template_spec = (
+            spec.get("template", {}).get("spec", {})            # Deployment / CronJob
+            if "template" in spec
+            else spec                                            # Service, Ingress, ...
+        )
+        containers = template_spec.get("containers") or []
+        for container in containers:
+            container.setdefault("envFrom", [])
+            container["envFrom"].extend(env_from)
+
+    @staticmethod
+    def _inject_app_env_from(scoop, namespace: str) -> list[dict]:
+        """Mira en el cluster si hay ConfigMap/Secret de la app; devuelve la lista
+        de entradas `envFrom` que hay que agregar al contenedor.
+
+        Best-effort: cualquier fallo del API server (cluster apagado, sin red)
+        devuelve lista vacia para que la generacion de manifiestos no se rompa.
+        """
+        app = getattr(scoop, "application", None)
+        if not app:
+            return []
+
+        try:
+            from app.core.k8s import get_clients
+            from kubernetes.client.exceptions import ApiException
+            from app.modules.configstore.service import ConfigStoreService
+
+            c = get_clients()
+            cm_name = ConfigStoreService.configmap_name_for(app)
+            secret_name = ConfigStoreService.secret_name_for(app)
+
+            env_from: list[dict] = []
+            try:
+                c.core.read_namespaced_config_map(cm_name, namespace)
+                env_from.append({"configMapRef": {"name": cm_name}})
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+            try:
+                c.core.read_namespaced_secret(secret_name, namespace)
+                env_from.append({"secretRef": {"name": secret_name}})
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+            return env_from
+        except Exception:  # noqa: BLE001 - best-effort, no debe romper la generacion
+            import logging
+            logging.getLogger(__name__).debug(
+                "envFrom no resuelto para app=%s ns=%s", app, namespace,
+                exc_info=True,
+            )
+            return []

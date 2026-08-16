@@ -16,6 +16,8 @@ _KIND_MAP = {
     "Ingress": ("networking", "ingress"),
     "HorizontalPodAutoscaler": ("autoscaling", "horizontal_pod_autoscaler"),
     "CronJob": ("batch", "cron_job"),
+    "ConfigMap": ("core", "config_map"),
+    "Secret": ("core", "secret"),
 }
 
 # CRDs de cert-manager: kind -> (group, version, plural)
@@ -289,6 +291,36 @@ class K8sService:
     def get_ingress(namespace: str, name: str) -> dict:
         clients = get_clients()
         return clients.serialize(clients.networking.read_namespaced_ingress(name, namespace))
+
+    # ---------- ConfigMaps / Secrets ----------
+
+    @staticmethod
+    def list_configmaps(namespace: str, label_selector: str | None = None) -> list[dict]:
+        """Lista ConfigMaps de un namespace como resumen (name, namespace, labels)."""
+        items = get_clients().core.list_namespaced_config_map(
+            namespace=namespace, label_selector=label_selector
+        ).items
+        return [_meta(cm) for cm in items]
+
+    @staticmethod
+    def get_configmap(namespace: str, name: str) -> dict:
+        """Devuelve el ConfigMap completo serializado (incluye data en texto plano)."""
+        clients = get_clients()
+        return clients.serialize(clients.core.read_namespaced_config_map(name, namespace))
+
+    @staticmethod
+    def list_secrets(namespace: str, label_selector: str | None = None) -> list[dict]:
+        """Lista Secrets de un namespace como resumen (data se omite a proposito)."""
+        items = get_clients().core.list_namespaced_secret(
+            namespace=namespace, label_selector=label_selector
+        ).items
+        return [_meta(s) for s in items]
+
+    @staticmethod
+    def get_secret(namespace: str, name: str) -> dict:
+        """Devuelve el Secret completo serializado (data en base64, tipo K8s)."""
+        clients = get_clients()
+        return clients.serialize(clients.core.read_namespaced_secret(name, namespace))
 
     # ---------- Certificados (cert-manager CRDs) ----------
 

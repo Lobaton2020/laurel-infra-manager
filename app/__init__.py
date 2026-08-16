@@ -29,6 +29,8 @@ SWAGGER_TEMPLATE = {
         {"name": "Deployments", "description": "Deployments, scale y restart"},
         {"name": "Services", "description": "Services"},
         {"name": "Ingresses", "description": "Ingresses (Traefik)"},
+        {"name": "ConfigStore", "description": "ConfigMaps y Secrets de aplicacion"},
+        {"name": "System", "description": "Secretos del backend y bootstrap"},
         {"name": "Audits", "description": "Historial de cambios"},
     ],
 }
@@ -68,7 +70,9 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.audits import bp as audits_bp
     from app.modules.cluster import bp as cluster_bp
     from app.modules.configurator import bp as configurator_bp
+    from app.modules.configstore import bp as configstore_bp
     from app.modules.scoops import bp as scoops_bp
+    from app.modules.system import bp as system_bp
 
     # CORS restringido a los origins del front; mandamos Bearer en header
     # (no usamos cookies), por eso no hace falta supports_credentials=True.
@@ -77,7 +81,7 @@ def create_app(config_class=Config) -> Flask:
 
     app.before_request(authenticate_request)
 
-    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, scoops_bp):
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, scoops_bp, system_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)
