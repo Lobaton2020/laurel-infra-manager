@@ -97,8 +97,16 @@ class ConfigStoreService:
 
         Idempotente: si ya existe con el mismo nombre se reemplaza; si no, se
         crea. El namespace se auto-crea si hace falta (mismo patron que los scoops).
+
+        Valida que `app` exista como `Application.slug`. Si no, lanza 404.
+        Esto evita crear recursos huérfanos en cluster para apps inexistentes
+        en la plataforma.
         """
         from app.modules.cluster.service import K8sService
+        from app.modules.apps.model import Application
+
+        if not Application.query.filter_by(slug=app, deleted_at=None).first():
+            raise NotFoundError(f"Application '{app}' no encontrada")
 
         if not K8sService.namespace_exists(namespace):
             K8sService.create_namespace(namespace)
@@ -207,8 +215,14 @@ class ConfigStoreService:
         `data` se almacena tal cual llega (base64). El caller es responsable de
         base64-encodear los valores para no obligar a la API a distinguir binario
         de texto: asi podemos pasar cualquier tipo de secreto.
+
+        Valida que `app` exista como `Application.slug`. Si no, lanza 404.
         """
         from app.modules.cluster.service import K8sService
+        from app.modules.apps.model import Application
+
+        if not Application.query.filter_by(slug=app, deleted_at=None).first():
+            raise NotFoundError(f"Application '{app}' no encontrada")
 
         if not K8sService.namespace_exists(namespace):
             K8sService.create_namespace(namespace)
