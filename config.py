@@ -76,7 +76,7 @@ class Config:
     # Jenkins esta expuesto en https://jenkings.andreslobaton.top (con la
     # grafia "jenkings", no "jenkins"). El build token se guarda en el
     # system secret `jenkins_token` (ver MANAGED en system/service.py).
-    JENKINS_URL = os.environ.get("JENKINS_URL", "https://jenkings.andreslobaton.top")
+    JENKINS_URL = os.environ.get("JENKINS_URL", "https://jenkins.andreslobaton.top")
     JENKINS_USER = os.environ.get("JENKINS_USER", "admin")
     JENKINS_BUILD_TOKEN_SECRET = "jenkins_token"
     # URL publica del webhook entrante de GitHub (la pones en Settings -> Webhooks).
