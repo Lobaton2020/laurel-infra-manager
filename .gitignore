@@ -22,4 +22,8 @@ kubeconfig*
 .DS_Store
 *.swp
 
+# Herramientas locales de desarrollo / indexado
+.codegraph/
+.opencode/
+
 # Frontend (ahora vive en configurator-lob/frontend, repositorio aparte)
