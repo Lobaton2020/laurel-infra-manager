@@ -126,6 +126,18 @@ class AppsService:
         else:
             events.append(("ghcr_repo", "ok", f"Imagen base ya provista: {docker_base}"))
 
+        # Check 3: namespace K8s `user-apps-<slug>` (idempotente).
+        # Lo creamos al crear la app para que ya este listo para secrets/configs/scoops.
+        k8s_namespace = f"user-apps-{slug}"
+        try:
+            from app.modules.cluster.service import K8sService
+            if not K8sService.namespace_exists(k8s_namespace):
+                K8sService.create_namespace(k8s_namespace)
+            events.append(("k8s_namespace", "ok", f"Namespace K8s listo: {k8s_namespace}"))
+        except Exception as exc:
+            events.append(("k8s_namespace", "error", f"No se pudo crear namespace: {exc}"))
+            logger.warning("k8s_namespace_failed para %s: %s", slug, exc)
+
         app = Application(
             name=name,
             slug=slug,

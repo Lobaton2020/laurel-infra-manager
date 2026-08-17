@@ -42,6 +42,11 @@ class ConfigStoreService:
     def secret_name_for(cls, app: str, name: str | None = None) -> str:
         return name or f"{app}{cls.SECRET_SUFFIX}"
 
+    @staticmethod
+    def namespace_for_app(app_slug: str) -> str:
+        """Namespace K8s derivado de una app: `user-apps-<slug>`."""
+        return f"user-apps-{app_slug}"
+
     @classmethod
     def _labels(cls, app: str, extra: dict | None = None) -> dict:
         labels = {
@@ -92,11 +97,12 @@ class ConfigStoreService:
         }
 
     @staticmethod
-    def upsert_configmap(app: str, namespace: str, name: str, data: dict) -> dict:
+    def upsert_configmap(app: str, namespace: str | None, name: str, data: dict) -> dict:
         """Crea o reemplaza un ConfigMap.
 
         Idempotente: si ya existe con el mismo nombre se reemplaza; si no, se
-        crea. El namespace se auto-crea si hace falta (mismo patron que los scoops).
+        crea. El namespace se auto-crea si hace falta. Si el caller no
+        indica `namespace`, se deriva de la app (`user-apps-<slug>`).
 
         Valida que `app` exista como `Application.slug`. Si no, lanza 404.
         Esto evita crear recursos huérfanos en cluster para apps inexistentes
@@ -108,8 +114,9 @@ class ConfigStoreService:
         if not Application.query.filter_by(slug=app, deleted_at=None).first():
             raise NotFoundError(f"Application '{app}' no encontrada")
 
-        if not K8sService.namespace_exists(namespace):
-            K8sService.create_namespace(namespace)
+        ns = namespace or ConfigStoreService.namespace_for_app(app)
+        if not K8sService.namespace_exists(ns):
+            K8sService.create_namespace(ns)
 
         clients = get_clients()
         body = {
@@ -209,12 +216,15 @@ class ConfigStoreService:
         }
 
     @staticmethod
-    def upsert_secret(app: str, namespace: str, name: str, data: dict) -> dict:
+    def upsert_secret(app: str, namespace: str | None, name: str, data: dict) -> dict:
         """Crea o reemplaza un Secret.
 
         `data` se almacena tal cual llega (base64). El caller es responsable de
         base64-encodear los valores para no obligar a la API a distinguir binario
         de texto: asi podemos pasar cualquier tipo de secreto.
+
+        Si el caller no indica `namespace`, se deriva de la app
+        (`user-apps-<slug>`).
 
         Valida que `app` exista como `Application.slug`. Si no, lanza 404.
         """
@@ -224,8 +234,9 @@ class ConfigStoreService:
         if not Application.query.filter_by(slug=app, deleted_at=None).first():
             raise NotFoundError(f"Application '{app}' no encontrada")
 
-        if not K8sService.namespace_exists(namespace):
-            K8sService.create_namespace(namespace)
+        ns = namespace or ConfigStoreService.namespace_for_app(app)
+        if not K8sService.namespace_exists(ns):
+            K8sService.create_namespace(ns)
 
         clients = get_clients()
         body = {

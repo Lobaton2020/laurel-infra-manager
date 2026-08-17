@@ -86,7 +86,9 @@ def create_configmap():
       422: {description: Datos invalidos}
     """
     payload = parse_body(ConfigMapCreate).model_dump()
-    namespace = payload["namespace"] or _ns()
+    # Si el caller no manda namespace, el service lo deriva de la app
+    # (`user-apps-<slug>`). Asi el front solo pide `app`.
+    namespace = payload.get("namespace")
     name = ConfigStoreService.configmap_name_for(payload["app"], payload.get("name"))
 
     result = ConfigStoreService.upsert_configmap(
@@ -220,7 +222,9 @@ def create_secret():
       422: {description: Datos invalidos}
     """
     payload = parse_body(SecretCreate).model_dump()
-    namespace = payload["namespace"] or _ns()
+    # Si el caller no manda namespace, el service lo deriva de la app
+    # (`user-apps-<slug>`). Asi el front solo pide `app`.
+    namespace = payload.get("namespace")
     name = ConfigStoreService.secret_name_for(payload["app"], payload.get("name"))
 
     result = ConfigStoreService.upsert_secret(
