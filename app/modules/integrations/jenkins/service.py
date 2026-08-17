@@ -1,6 +1,7 @@
 """Cliente REST para Jenkins (build triggers via build token, sin SDK)."""
 import logging
 import re
+import traceback
 from typing import Literal
 
 import requests
@@ -112,8 +113,14 @@ class JenkinsService:
                 timeout=JENKINS_TIMEOUT,
             )
         except requests.RequestException as exc:
-            logger.warning("Jenkins timeout en %s: %s", url, exc)
+            logger.error(
+                "Jenkins timeout excepcion en %s: %s\n%s",
+                url, exc, traceback.format_exc()
+            )
             raise AppError("Jenkins timeout", status_code=504) from exc
+
+        resp_text = resp.text
+        resp_headers = str(resp.headers)
 
         if resp.status_code in (200, 201):
             # Jenkins responde 201 con un header `Location: /job/<job>/<n>/`
@@ -125,11 +132,23 @@ class JenkinsService:
             )
             return {"job": job, "number": number, "url": build_url}
         if resp.status_code in (401, 403):
+            logger.error(
+                "Jenkins authentication failed (status=%s)\n"
+                "Body: %s\n"
+                "Headers: %s",
+                resp.status_code, resp_text, resp_headers
+            )
             raise AppError("Jenkins authentication failed", status_code=502)
         if resp.status_code == 404:
+            logger.error(
+                "Jenkins job not found (status=%s)\n"
+                "Job: %s\n"
+                "Body: %s",
+                resp.status_code, job, resp_text
+            )
             raise AppError(f"Jenkins job '{job}' not found", status_code=404)
         raise AppError(
-            f"Jenkins API error {resp.status_code}: {resp.text[:200]}",
+            f"Jenkins API error {resp.status_code}: {resp_text[:200]}",
             status_code=502,
         )
 
@@ -144,7 +163,10 @@ class JenkinsService:
                 timeout=JENKINS_TIMEOUT,
             )
         except requests.RequestException as exc:
-            logger.warning("Jenkins job_exists fallo para %s: %s", slug, exc)
+            logger.warning(
+                "Jenkins job_exists fallo para %s: %s\n%s",
+                slug, exc, traceback.format_exc()
+            )
             return False
         return resp.status_code == 200
 
@@ -165,7 +187,10 @@ class JenkinsService:
         try:
             resp = requests.get(url, timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
-            logger.warning("Jenkins get_build_status fallo: %s", exc)
+            logger.error(
+                "Jenkins get_build_status fallo: %s\n%s",
+                exc, traceback.format_exc()
+            )
             raise AppError("Jenkins timeout", status_code=504) from exc
         if resp.status_code == 404:
             raise AppError(

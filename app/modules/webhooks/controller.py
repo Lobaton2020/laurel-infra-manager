@@ -13,6 +13,7 @@ Flujo:
 5. El status se actualiza on-demand cuando la UI hace GET (polling a Jenkins).
 """
 import logging
+import traceback
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -112,7 +113,10 @@ def github_webhook():
         # o token pendiente): se reporta y se devuelve 200. Aun asi creamos
         # el AppBuild con status='pending' para que aparezca en la lista
         # y el operador lo vea y pueda re-dispararlo.
-        logger.warning("jenkins trigger fallo para %s: %s", slug, exc.message)
+        logger.error(
+                "jenkins trigger fallo para %s: %s\n%s",
+                slug, exc.message, traceback.format_exc()
+            )
         jenkins_info = {"triggered": False, "error": exc.message}
 
     # Creamos el build record (incluso si Jenkins fallo al disparar:
