@@ -67,6 +67,7 @@ class ApplicationCreate(BaseModel):
     github_repo_url: Optional[str] = Field(None, max_length=255)
     docker_image_base: Optional[str] = Field(None, max_length=255)
     create_github_repo: bool = False
+    workspace_id: Optional[int] = None
 
     @field_validator("name")
     @classmethod
@@ -101,6 +102,7 @@ class ApplicationUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=500)
     github_repo_url: Optional[str] = Field(None, max_length=255)
     docker_image_base: Optional[str] = Field(None, max_length=255)
+    workspace_id: Optional[int] = None
 
     @field_validator("description")
     @classmethod
@@ -128,6 +130,7 @@ class ApplicationResponse(BaseModel):
     description: Optional[str] = None
     github_repo_url: Optional[str] = None
     docker_image_base: Optional[str] = None
+    workspace_id: Optional[int] = None
 
     scoops_count: int = 0
     domains_count: int = 0
@@ -147,6 +150,7 @@ class ApplicationResponse(BaseModel):
             description=app.description,
             github_repo_url=app.github_repo_url,
             docker_image_base=app.docker_image_base,
+            workspace_id=app.workspace_id,
             scoops_count=scoops_count,
             domains_count=domains_count,
             namespace=app.slug,

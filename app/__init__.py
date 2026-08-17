@@ -31,6 +31,7 @@ SWAGGER_TEMPLATE = {
         {"name": "Ingresses", "description": "Ingresses (Traefik)"},
         {"name": "ConfigStore", "description": "ConfigMaps y Secrets de aplicacion"},
         {"name": "Apps", "description": "Applications de primer nivel (namespace dedicado)"},
+        {"name": "Workspaces", "description": "Workspaces de primer nivel: agrupamiento logico de Applications"},
         {"name": "Domains", "description": "Subdominios public (uno por Scoop)"},
         {"name": "DomainPool", "description": "Catalogo de dominios de segundo nivel propios"},
         {"name": "System", "description": "Secretos del backend y bootstrap"},
@@ -57,6 +58,7 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.configurator.schemas.model import Column, Schema  # noqa: F401
     from app.modules.users.model import User  # noqa: F401
     from app.modules.apps.model import Application  # noqa: F401
+    from app.modules.workspaces.model import Workspace  # noqa: F401
     from app.modules.scoops.model import Scoop  # noqa: F401
     from app.modules.domains.model import Domain  # noqa: F401
     from app.modules.domain_pool.model import DomainPool  # noqa: F401
@@ -77,6 +79,7 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.configurator import bp as configurator_bp
     from app.modules.configstore import bp as configstore_bp
     from app.modules.apps import bp as apps_bp
+    from app.modules.workspaces import bp as workspaces_bp
     from app.modules.domains import bp as domains_bp
     from app.modules.domain_pool import bp as domain_pool_bp
     from app.modules.scoops import bp as scoops_bp
@@ -90,7 +93,7 @@ def create_app(config_class=Config) -> Flask:
 
     app.before_request(authenticate_request)
 
-    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp):
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, workspaces_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)

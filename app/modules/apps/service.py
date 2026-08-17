@@ -10,6 +10,7 @@ from app.core.utils import utcnow
 from app.modules.apps.model import Application
 from app.modules.audits.service import AuditService
 from app.modules.scoops.schema import slugify
+from app.modules.workspaces.model import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ class AppsService:
         github_url = data.get("github_repo_url")
         docker_base = data.get("docker_image_base")
         create_repo_flag = data.get("create_github_repo", False)
+        workspace_id = data.get("workspace_id")
+        if workspace_id is not None and not db.session.get(Workspace, workspace_id):
+            raise NotFoundError(f"Workspace {workspace_id} no encontrado")
 
         if create_repo_flag and not github_url:
             # Solo intentamos crear si el caller no paso una URL custom.
@@ -112,6 +116,7 @@ class AppsService:
             description=data.get("description"),
             github_repo_url=github_url,
             docker_image_base=docker_base,
+            workspace_id=workspace_id,
         )
         try:
             db.session.add(app)
@@ -131,6 +136,11 @@ class AppsService:
     @staticmethod
     def update(app_id: int, data: dict) -> Application:
         app = AppsService.get(app_id)
+        if "workspace_id" in data:
+            wid = data["workspace_id"]
+            if wid is not None and not db.session.get(Workspace, wid):
+                raise NotFoundError(f"Workspace {wid} no encontrado")
+            app.workspace_id = wid
         for field in ("description", "github_repo_url", "docker_image_base"):
             if field in data:
                 setattr(app, field, data[field])
@@ -138,7 +148,7 @@ class AppsService:
         AuditService.log(
             "app_update", "application", app.id,
             {k: v for k, v in data.items() if k in (
-                "description", "github_repo_url", "docker_image_base"
+                "description", "github_repo_url", "docker_image_base", "workspace_id"
             )},
         )
         return app

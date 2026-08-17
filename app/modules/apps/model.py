@@ -41,6 +41,12 @@ class Application(db.Model):
     github_repo_url = db.Column(db.String(255))
     docker_image_base = db.Column(db.String(255))
 
+    # Workspace opcional (agrupamiento logico). NULL = "sin agrupar".
+    workspace_id = db.Column(db.Integer, db.ForeignKey("workspaces.id"))
+    workspace = db.relationship(
+        "Workspace", backref=db.backref("applications", lazy="dynamic")
+    )
+
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     deleted_at = db.Column(db.DateTime)
