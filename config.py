@@ -79,10 +79,11 @@ class Config:
     JENKINS_USER = os.environ.get("JENKINS_USER", "admin")
     JENKINS_BUILD_TOKEN_SECRET = "jenkins_token"
     # URL publica del webhook entrante de GitHub (la pones en Settings -> Webhooks).
-    # El default deriva del subdominio estandar (laurel. + INGRESS_BASE_DOMAIN).
+    # El host del API es laurel-api.<dominio> (Ingress laurel-api-ingress → backend);
+    # el host `laurel.<dominio>` es el frontend nginx y rechaza POST (405).
     GITHUB_WEBHOOK_URL = os.environ.get(
         "GITHUB_WEBHOOK_URL",
-        f"https://laurel.{INGRESS_BASE_DOMAIN}/api/webhooks/github",
+        f"https://laurel-api.{INGRESS_BASE_DOMAIN}/api/webhooks/github",
     )
     # Secreto compartido con GitHub para firmar los payloads del webhook
     # (header X-Hub-Signature-256). Vacío = webhook deshabilitado (503).
