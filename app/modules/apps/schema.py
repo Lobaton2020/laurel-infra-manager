@@ -132,6 +132,7 @@ class ApplicationResponse(BaseModel):
     docker_image_base: Optional[str] = None
     workspace_id: Optional[int] = None
     status: str = "provisioning"
+    current_version: str = "0.0.1"
 
     scoops_count: int = 0
     domains_count: int = 0
@@ -154,6 +155,7 @@ class ApplicationResponse(BaseModel):
             docker_image_base=app.docker_image_base,
             workspace_id=app.workspace_id,
             status=app.status,
+            current_version=app.current_version or "0.0.1",
             scoops_count=scoops_count,
             domains_count=domains_count,
             namespace=app.slug,

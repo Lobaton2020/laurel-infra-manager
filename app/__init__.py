@@ -78,6 +78,7 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.cluster import bp as cluster_bp
     from app.modules.configurator import bp as configurator_bp
     from app.modules.configstore import bp as configstore_bp
+    from app.modules.builds import bp as builds_bp
     from app.modules.apps import bp as apps_bp
     from app.modules.workspaces import bp as workspaces_bp
     from app.modules.domains import bp as domains_bp
@@ -93,7 +94,7 @@ def create_app(config_class=Config) -> Flask:
 
     app.before_request(authenticate_request)
 
-    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, workspaces_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp):
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, workspaces_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp, builds_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)

@@ -42,14 +42,21 @@ class TestTriggerBuild:
 
         def _post(url, params=None, data=None, timeout=None):
             posted.update(url=url, params=params, data=data, timeout=timeout)
-            return Mock(status_code=201)
+            resp = Mock(status_code=201)
+            # Jenkins responde 201 con header `Location: /job/<job>/<n>/`.
+            resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/42/"}
+            return resp
 
         monkeypatch.setattr(jenkins_service.requests, "post", _post)
         monkeypatch.setattr(jenkins_service, "_get_build_token", lambda: "tok123")
         with app.app_context():
             result = JenkinsService.trigger_build("notas", "1.2.4")
 
-        assert result == {"job": "laurel_notas", "url": "http://jenkins:8080/job/laurel_notas"}
+        assert result == {
+            "job": "laurel_notas",
+            "number": 42,
+            "url": "http://jenkins:8080/job/laurel_notas/42",
+        }
         assert posted["url"] == "http://jenkins:8080/job/laurel_notas/buildWithParameters"
         assert posted["params"] == {"token": "tok123"}
         assert posted["timeout"] == jenkins_service.JENKINS_TIMEOUT

@@ -1,6 +1,7 @@
 """Cliente REST para Jenkins (build triggers via build token, sin SDK)."""
 import logging
 import re
+from typing import Literal
 
 import requests
 
@@ -10,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 PREFIX = "laurel_"
 JENKINS_TIMEOUT = 10
+
+# Estados de Jenkins segun el JSON de /job/<job>/<n>/api/json.
+# result: "SUCCESS" | "FAILURE" | "UNSTABLE" | "ABORTED" | "NOT_BUILT" | None
+# building: True mientras corre, False cuando termino.
+BuildStatus = Literal["pending", "running", "success", "failed", "aborted"]
 
 # DNS-1123 (igual patron que el resto del proyecto)
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -55,7 +61,9 @@ class JenkinsService:
         """Dispara el build remoto de `laurel_<slug>` con `tag`.
 
         Auth por Jenkins build token (trigger remoto): el token va en el
-        query param. Returns `{"job", "url"}`.
+        query param. Returns `{"job", "number", "url"}` donde `url` es
+        la URL directa al build (con su numero) si se pudo extraer del
+        header `Location`; si no, cae a la URL del job.
         Raises:
             AppError 503 si el build token no esta configurado.
             AppError 502 si Jenkins responde 401/403 (token invalido).
@@ -85,7 +93,14 @@ class JenkinsService:
             raise AppError("Jenkins timeout", status_code=504) from exc
 
         if resp.status_code in (200, 201):
-            return {"job": job, "url": f"{base}/job/{job}"}
+            # Jenkins responde 201 con un header `Location: /job/<job>/<n>/`
+            # del que extraemos el numero de build. Si no esta, devolvemos
+            # solo la URL del job y number=None.
+            number = _parse_build_number(resp.headers.get("Location"))
+            build_url = (
+                f"{base}/job/{job}/{number}" if number else f"{base}/job/{job}"
+            )
+            return {"job": job, "number": number, "url": build_url}
         if resp.status_code in (401, 403):
             raise AppError("Jenkins authentication failed", status_code=502)
         if resp.status_code == 404:
@@ -109,3 +124,75 @@ class JenkinsService:
             logger.warning("Jenkins job_exists fallo para %s: %s", slug, exc)
             return False
         return resp.status_code == 200
+
+    @staticmethod
+    def get_build_status(slug: str, build_number: int) -> dict:
+        """Consulta el status actual de un build de Jenkins.
+
+        Returns: `{"status", "building", "result", "timestamp"}` mapeado
+        a los valores del modelo AppBuild:
+        - building=True  -> 'running'
+        - building=False -> result mapeado: SUCCESS=success, FAILURE=failed,
+                            UNSTABLE=failed, ABORTED=aborted, NOT_BUILT=failed
+        - 404/otro: lanza AppError
+        """
+        _validate_slug(slug)
+        base = JenkinsService._base_url()
+        url = f"{base}/job/{PREFIX}{slug}/{build_number}/api/json"
+        try:
+            resp = requests.get(url, timeout=JENKINS_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.warning("Jenkins get_build_status fallo: %s", exc)
+            raise AppError("Jenkins timeout", status_code=504) from exc
+        if resp.status_code == 404:
+            raise AppError(
+                f"Jenkins build {PREFIX}{slug}/{build_number} not found",
+                status_code=404,
+            )
+        if resp.status_code != 200:
+            raise AppError(
+                f"Jenkins API error {resp.status_code}: {resp.text[:200]}",
+                status_code=502,
+            )
+        data = resp.json()
+        building = bool(data.get("building"))
+        result = data.get("result")
+        if building:
+            status: BuildStatus = "running"
+        else:
+            status = _map_jenkins_result(result)
+        return {
+            "status": status,
+            "building": building,
+            "result": result,
+            "timestamp": data.get("timestamp"),
+        }
+
+
+def _parse_build_number(location_header: str | None) -> int | None:
+    """Extrae el build number del header `Location` de un POST a buildWithParameters.
+
+    Formato esperado: 'http://jenkins/job/<job>/<n>/' o '/job/<job>/<n>/'.
+    Devuelve None si el header no se puede parsear.
+    """
+    if not location_header:
+        return None
+    # Tomamos el ultimo segmento con digitos.
+    parts = [p for p in location_header.rstrip("/").split("/") if p]
+    for p in reversed(parts):
+        if p.isdigit():
+            return int(p)
+    return None
+
+
+def _map_jenkins_result(result: str | None) -> BuildStatus:
+    """Traduce el `result` de Jenkins al enum de AppBuild."""
+    if result == "SUCCESS":
+        return "success"
+    if result == "ABORTED":
+        return "aborted"
+    if result in ("FAILURE", "UNSTABLE", "NOT_BUILT"):
+        return "failed"
+    # result=None con building=False es raro; lo marcamos como failed
+    # para no dejarlo colgado en 'pending' para siempre.
+    return "failed"

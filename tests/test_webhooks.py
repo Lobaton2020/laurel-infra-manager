@@ -1,4 +1,4 @@
-"""Tests del webhook GitHub -> bump de version + trigger Jenkins."""
+"""Tests del webhook GitHub -> trigger Jenkins con la version de la app."""
 import hashlib
 import hmac
 import json
@@ -38,16 +38,23 @@ def _post(client, payload: dict, secret: str = SECRET, signature: str | None = N
     return client.post("/api/webhooks/github", data=body, headers=headers)
 
 
-def _create_app_and_scoop(client) -> dict:
+def _create_app_and_scoop(client, *, current_version: str = "0.0.1") -> dict:
     r = client.post("/api/apps", json={"name": "Portafolio Web"})
     assert r.status_code == 201
     app_data = r.get_json()
+    # La version la setea la UI via PATCH; simulamos ese flujo.
+    if current_version != "0.0.1":
+        r = client.patch(
+            f"/api/apps/{app_data['id']}/current-version",
+            json={"version": current_version},
+        )
+        assert r.status_code == 200, r.get_json()
     r = client.post("/api/scoops", json={
         "name": "portafolio",
         "application": "portafolio-web",
         "application_id": app_data["id"],
         "type": "api",
-        "version": "1.4.2",
+        "version": current_version,
         "url_registry": "ghcr.io/lobaton/portafolio:latest",
         "requested_vcpu": "100m",
         "requested_memory": "128Mi",
@@ -58,17 +65,6 @@ def _create_app_and_scoop(client) -> dict:
     })
     assert r.status_code == 201, r.get_json()
     return app_data
-
-
-class TestBumpVersion:
-    def test_semver_patch_bump(self):
-        assert webhook_service._bump_version("1.2.3") == "1.2.4"
-
-    def test_non_semver_uses_short_sha(self):
-        assert webhook_service._bump_version("v1", "abcdef0123456") == "abcdef0"
-
-    def test_non_semver_without_sha_keeps_current(self):
-        assert webhook_service._bump_version("v1", "") == "v1"
 
 
 class TestVerifySignature:
@@ -95,15 +91,21 @@ class TestWebhookEndpoint:
         r = _post(client, _push_payload("portafolio-web"), signature="sha256=0" * 4)
         assert r.status_code == 401
 
-    def test_valid_push_bumps_scoops_and_triggers_jenkins(self, app, client, monkeypatch):
+    def test_valid_push_uses_app_current_version_and_triggers_jenkins(
+        self, app, client, monkeypatch,
+    ):
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
-        _create_app_and_scoop(client)
+        _create_app_and_scoop(client, current_version="1.4.2")
         triggered = {}
 
         def _fake_trigger(slug, tag):
             triggered["slug"] = slug
             triggered["tag"] = tag
-            return {"job": f"laurel_{slug}", "url": f"http://jenkins:8080/job/laurel_{slug}"}
+            return {
+                "job": f"laurel_{slug}",
+                "number": 42,
+                "url": f"http://jenkins:8080/job/laurel_{slug}/42",
+            }
 
         monkeypatch.setattr(JenkinsService, "trigger_build", _fake_trigger)
         r = _post(client, _push_payload("portafolio-web", sha="b" * 40))
@@ -111,17 +113,55 @@ class TestWebhookEndpoint:
         data = r.get_json()
         assert data["received"] is True
         assert data["app"] == "portafolio-web"
-        assert data["new_version"] == "1.4.3"
+        # La version la decide la UI: NO se auto-bumpea.
+        assert data["version"] == "1.4.2"
+        assert data["commit_sha"] == "b" * 40
+        assert data["build_id"] is not None
         assert data["jenkins"] == {
             "triggered": True,
             "job": "laurel_portafolio-web",
-            "url": "http://jenkins:8080/job/laurel_portafolio-web",
+            "number": 42,
+            "url": "http://jenkins:8080/job/laurel_portafolio-web/42",
         }
-        assert triggered == {"slug": "portafolio-web", "tag": "1.4.3"}
+        assert triggered == {"slug": "portafolio-web", "tag": "1.4.2"}
 
-    def test_jenkins_failure_returns_200_with_error(self, app, client, monkeypatch):
+    def test_valid_push_creates_build_record(
+        self, app, client, monkeypatch,
+    ):
+        """El webhook crea un AppBuild en BD que la UI puede listar."""
+        from app.modules.apps.model import Application
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
-        _create_app_and_scoop(client)
+        _create_app_and_scoop(client, current_version="2.0.0")
+
+        def _fake_trigger(slug, tag):
+            return {"job": f"laurel_{slug}", "number": 7, "url": "http://x"}
+
+        monkeypatch.setattr(JenkinsService, "trigger_build", _fake_trigger)
+        r = _post(client, _push_payload("portafolio-web", sha="c" * 40))
+        assert r.status_code == 200
+        build_id = r.get_json()["build_id"]
+        assert build_id is not None
+
+        # Listar builds via API: necesitamos el id numerico de la app.
+        app_row = Application.query.filter_by(slug="portafolio-web").first()
+        assert app_row is not None
+        list_r = client.get(f"/api/apps/{app_row.id}/builds")
+        assert list_r.status_code == 200
+        items = list_r.get_json()["items"]
+        assert len(items) >= 1
+        b = next((it for it in items if it["id"] == build_id), None)
+        assert b is not None
+        assert b["version"] == "2.0.0"
+        assert b["commit_sha"] == "c" * 40
+        assert b["status"] in ("pending", "running")
+        assert b["jenkins_job"] == "laurel_portafolio-web"
+        assert b["jenkins_number"] == 7
+
+    def test_jenkins_failure_returns_200_with_error_and_pending_build(
+        self, app, client, monkeypatch,
+    ):
+        app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
+        _create_app_and_scoop(client, current_version="1.4.2")
 
         def _boom(slug, tag):
             raise AppError(f"Jenkins job 'laurel_{slug}' not found", status_code=404)
@@ -130,13 +170,14 @@ class TestWebhookEndpoint:
         r = _post(client, _push_payload("portafolio-web"))
         assert r.status_code == 200
         data = r.get_json()
-        assert data["new_version"] == "1.4.3"
+        assert data["version"] == "1.4.2"
         assert data["jenkins"]["triggered"] is False
         assert "not found" in data["jenkins"]["error"]
+        # Pero el build igual se creo, para que el operador lo investigue.
+        assert data["build_id"] is not None
 
     def test_non_master_push_skipped(self, app, client, monkeypatch):
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
-        # no se toca Jenkins ni se bumpa nada
         def _unexpected(*a, **k):
             raise AssertionError("no debe dispararse jenkins")
         monkeypatch.setattr(JenkinsService, "trigger_build", _unexpected)

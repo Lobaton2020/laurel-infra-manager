@@ -52,6 +52,11 @@ class Application(db.Model):
     # obligatorio (repo GitHub / repo Docker Hub) fallo.
     status = db.Column(db.String(20), default="provisioning", nullable=False)
 
+    # Version semver de la app (la que el webhook pasa a Jenkins como TAG al
+    # recibir un push a master). La UI la setea; si esta vacia, el webhook
+    # auto-bumpea desde 0.0.0 (legado).
+    current_version = db.Column(db.String(50), default="0.0.1", nullable=False)
+
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     deleted_at = db.Column(db.DateTime)
@@ -71,6 +76,9 @@ class Application(db.Model):
         order_by="AppEvent.id.asc()",
         cascade="all, delete-orphan", passive_deletes=True,
     )
+    # Los builds se acceden via BuildsService.list_for_app(app.id); no
+    # definimos relationship para evitar un import cruzado apps <-> builds
+    # que rompe la carga de los modelos en el orden actual.
 
     def __repr__(self) -> str:
         return f"<Application {self.slug} (id={self.id})>"
