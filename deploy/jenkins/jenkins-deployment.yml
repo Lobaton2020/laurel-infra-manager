@@ -14,6 +14,22 @@ spec:
       labels:
         app: jenkins
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /var/jenkins_home
+              chmod -R 755 /var/jenkins_home
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
       containers:
         - name: jenkins
           image: jenkins/jenkins:lts-jdk17
@@ -25,7 +41,7 @@ spec:
               name: agent
           env:
             - name: JAVA_OPTS
-              value: "-Djenkins.install.runSetupWizard=false"
+              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.CrumbFilter.DISABLE_CSRF_PROTECTION=true"
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
@@ -35,15 +51,15 @@ spec:
             httpGet:
               path: /login
               port: 8080
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
           resources:
             requests:
-              cpu: "200m"
-              memory: "512Mi"
+              cpu: "500m"
+              memory: "1Gi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "2000m"
+              memory: "4Gi"
       volumes:
         - name: jenkins-home
           persistentVolumeClaim:
@@ -51,6 +67,7 @@ spec:
         - name: init-scripts
           configMap:
             name: jenkins-init-scripts
+            defaultMode: 0755
 ---
 apiVersion: v1
 kind: ConfigMap
