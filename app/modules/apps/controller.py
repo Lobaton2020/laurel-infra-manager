@@ -21,10 +21,15 @@ def _serialize(app, scoops_count: int = 0, domains_count: int = 0) -> dict:
 
 def _counts_for(app) -> tuple[int, int]:
     """Cuenta scoops vivos y domains vivos de la app."""
-    scoops_count = app.scoops.filter_by(deleted_at=None).count() \
-        if hasattr(app.scoops, "filter_by") else 0
-    domains_count = app.domains.filter_by(deleted_at=None).count() \
-        if hasattr(app.domains, "filter_by") else 0
+    from app.modules.scoops.model import Scoop
+    from app.modules.domains.model import Domain
+
+    scoops_count = (
+        Scoop.query.filter_by(application_id=app.id).count()
+    )
+    domains_count = (
+        Domain.query.filter_by(application_id=app.id, deleted_at=None).count()
+    )
     return scoops_count, domains_count
 
 

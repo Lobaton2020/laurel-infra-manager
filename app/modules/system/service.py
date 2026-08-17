@@ -47,6 +47,23 @@ MANAGED: dict[str, ManagedSecret] = {
         kind="text",
         deployment="laurel-infra-manager",
     ),
+    # Secrets para integraciones externas. Se exponen al backend como
+    # variables de entorno (no como archivos) y se montan en el deployment
+    # del sistema via `envFrom`/Secret-key en deploy/base/deployment.yml.
+    "github_pat": ManagedSecret(
+        namespace="prod",
+        name="laurel-integrations",
+        key="github-pat",
+        kind="text",
+        deployment="laurel-infra-manager",
+    ),
+    "docker_pat": ManagedSecret(
+        namespace="prod",
+        name="laurel-integrations",
+        key="docker-pat",
+        kind="text",
+        deployment="laurel-infra-manager",
+    ),
 }
 
 

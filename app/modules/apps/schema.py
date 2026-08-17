@@ -9,10 +9,11 @@ from app.modules.scoops.schema import slugify
 # DNS-1123 reutilizado del modulo scoops (mismo patron).
 DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
-# docker_image_base: <algo>/<algo> con `-` y `_` permitidos (registry + repo).
-# Acepta: aflobaton/laurel-notas, ghcr.io/owner/app, etc. Sin tag.
+# docker_image_base: <algo>/<algo>/<algo>... con `-` y `_` permitidos.
+# Acepta 2 o 3 segmentos: `namespace/repo` o `registry/namespace/repo`.
+# Sin tag. 4+ segmentos no son validos como imagen Docker.
 DOCKER_IMAGE_BASE = re.compile(
-    r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$"
+    r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$"
 )
 
 

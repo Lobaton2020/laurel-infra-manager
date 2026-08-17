@@ -86,6 +86,10 @@ def fake_cluster(monkeypatch):
     core._put("prod", "laurel-kubeconfig", {
         "k3s.yaml": _b64("apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n"),
     })
+    core._put("prod", "laurel-integrations", {
+        "github-pat": _b64(""),
+        "docker-pat": _b64(""),
+    })
 
     monkeypatch.setattr("app.core.k8s.get_clients", lambda: fake)
     monkeypatch.setattr("app.modules.cluster.service.get_clients", lambda: fake)
@@ -129,12 +133,13 @@ class TestWhitelist:
 # ---------- Tests de endpoints ----------
 
 class TestListManaged:
-    def test_returns_both_with_meta_no_values(self, client, fake_cluster):
+    def test_returns_all_with_meta_no_values(self, client, fake_cluster):
         r = client.get("/api/system/secrets")
         assert r.status_code == 200
         items = r.get_json()["items"]
         ids = {it["id"] for it in items}
-        assert ids == {"laurel-secrets", "laurel-kubeconfig"}
+        # 4 secretos: 2 originales + github_pat + docker_pat
+        assert ids == {"laurel-secrets", "laurel-kubeconfig", "github_pat", "docker_pat"}
         # Solo campos meta, no exponemos los valores de las claves.
         for item in items:
             assert "content" not in item

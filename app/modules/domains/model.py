@@ -39,6 +39,12 @@ class Domain(db.Model):
         nullable=False, index=True,
     )
 
+    # backref desde Scoop: scoop.domains para listar los domains del scoop.
+    scoop = db.relationship(
+        "Scoop", backref=db.backref("domains", lazy="dynamic"),
+        foreign_keys=[scoop_id],
+    )
+
     host = db.Column(db.String(253), unique=True, nullable=False)
     tls = db.Column(db.Boolean, nullable=False, default=True)
     status = db.Column(db.String(16), nullable=False, default="pending")
