@@ -8,6 +8,11 @@ kubectl apply -k deploy/jenkins
 
 Crea en el namespace `prod`: Deployment + Service + Ingress (`jenkins.andreslobaton.top`), un PVC `jenkins-home` (10Gi, `local-path`) y el certificado TLS vía cert-manager (`letsencrypt-prod`).
 
+> El nodo homelob corre **containerd** (k3s), sin daemon docker, así que el manifest **no** monta `/var/run/docker.sock`. Jenkins arranca igual; el paso `docker build/push` de los jobs necesita una de estas opciones:
+>
+> - **A (host)**: `sudo apt install docker.io && sudo systemctl enable --now docker` en homelob, y volver a añadir en el Deployment el volumen `docker-sock` (hostPath `/var/run/docker.sock`, `type: Socket`).
+> - **B (DinD)**: desplegar `docker:dind` (privileged) + Service `dind:2375` y en el job usar `DOCKER_HOST=tcp://dind:2375`.
+
 ## Password admin inicial
 
 Sin wizard (`-Djenkins.install.runSetupWizard=false`), el password inicial sigue guardado en el home:

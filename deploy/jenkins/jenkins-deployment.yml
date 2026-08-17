@@ -29,18 +29,13 @@ spec:
             # Opcional: pinta config adicional de Jenkins al arrancar.
             - name: JENKINS_OPTS
               value: ""
-          # El controller necesita el socket docker del host para `docker build`
-          # / `docker push` dentro de los jobs (ejecucion dinerente en el pod).
-          # ponytail: privileged=true escala a todo el nodo para el pod; si se
-          #   quiere limitar exposure, mover los agentes fuera del pod y darles
-          #   el socket por separado con --group-add de docker.
-          securityContext:
-            privileged: true
+          # homelob corre containerd (k3s), no hay /var/run/docker.sock en el
+          # nodo, asi que el socket no se monta. Para `docker build/push` en
+          # los jobs: instalar docker en el nodo (opcion A, docs/jenkins.md) y
+          # volver a anadir este volumen, o usar DinD (opcion B).
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
-            - name: docker-sock
-              mountPath: /var/run/docker.sock
           readinessProbe:
             httpGet:
               path: /login
@@ -58,10 +53,6 @@ spec:
         - name: jenkins-home
           persistentVolumeClaim:
             claimName: jenkins-home
-        - name: docker-sock
-          hostPath:
-            path: /var/run/docker.sock
-            type: Socket
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
