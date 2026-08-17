@@ -14,18 +14,42 @@ spec:
       labels:
         app: jenkins
     spec:
+      initContainers:
+        - name: fix-permissions
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "🔧 Arreglando permisos..."
+              mkdir -p /var/jenkins_home
+              chown -R 1000:1000 /var/jenkins_home
+              chmod -R 755 /var/jenkins_home
+              echo "✅ Permisos arreglados"
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
       containers:
         - name: jenkins
           image: jenkins/jenkins:lts-jdk17
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
           ports:
             - containerPort: 8080
               name: http
+              protocol: TCP
             - containerPort: 50000
               name: agent
+              protocol: TCP
           env:
             - name: JAVA_OPTS
-              value: "-Djenkins.install.runSetupWizard=false -Xmx512m -Xms256m"
+              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=true -Xmx512m -Xms256m"
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
@@ -35,14 +59,14 @@ spec:
             httpGet:
               path: /login
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 90
             periodSeconds: 10
             failureThreshold: 10
           livenessProbe:
             httpGet:
               path: /login
               port: 8080
-            initialDelaySeconds: 120
+            initialDelaySeconds: 150
             periodSeconds: 30
             failureThreshold: 5
           resources:
