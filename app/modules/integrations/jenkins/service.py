@@ -63,9 +63,13 @@ class JenkinsService:
     def _get_crumb() -> str:
         """Obtiene el crumb de CSRF de Jenkins para incluir en POSTs.
 
-        Intenta obtener el crumb. Si falla (crumb issuer no configurado,
-        endpoint distinto, o error), retorna "" para que el request
-        continúe sin crumb (funciona si Jenkins tiene seguridad desactivada).
+        Intenta obtener el crumb desde el endpoint /json de Jenkins.
+        Si falla (crumb issuer no configurado, endpoint distinto, o error),
+        retorna "" para que el request continúe sin crumb (funciona si
+        Jenkins tiene seguridad desactivada).
+
+        El response esperado es JSON:
+        {"_class":"hudson.security.csrf.DefaultCrumbIssuer","crumb":"e2b5..."}
         """
         base = JenkinsService._base_url()
         url = f"{base}{JENKINS_CRUMB_URL}"
@@ -80,11 +84,36 @@ class JenkinsService:
                 )
                 return ""
             resp.raise_for_status()
-            crumb_field = resp.text.strip()
-            if not crumb_field:
-                logger.warning("Crumb vacío obtenido de %s", url)
-                return ""
-            return crumb_field
+            # Parsear JSON response
+            import json as _json
+            try:
+                crumb_data = _json.loads(resp.text)
+                crumb = crumb_data.get("crumb", "")
+                crumb_field = crumb_data.get("crumbRequestField", "Jenkins-Crumb")
+                logger.debug(
+                    "Crumb obtenido de Jenkins JSON: crumb='%s', field='%s'",
+                    crumb, crumb_field
+                )
+                # Retornar el crumb vacío si no tiene valor
+                if not crumb:
+                    logger.warning("Crumb vacío en response JSON de %s", url)
+                    return ""
+                return crumb
+            except (_json.JSONDecodeError, ValueError) as exc:
+                logger.warning(
+                    "No se pudo parsear JSON del crumb issuer en %s: %s",
+                    url, exc
+                )
+                # Fallback: intentar usar resp.text strippeado
+                crumb_field = resp.text.strip()
+                if not crumb_field:
+                    logger.warning("Crumb text vacío después de fallo JSON en %s", url)
+                    return ""
+                logger.warning(
+                    "Usando crumb text fallback de %s: %s",
+                    url, crumb_field[:50] if len(crumb_field) > 50 else crumb_field
+                )
+                return crumb_field
         except requests.RequestException as exc:
             logger.warning(
                 "No se pudo obtener crumb de %s: %s (continuando sin crumb)",
