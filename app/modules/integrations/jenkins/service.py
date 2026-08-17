@@ -8,7 +8,7 @@ import requests
 
 from app.core.errors import AppError
 
-JENKINS_CRUMB_URL = "/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%20//crumb)"
+JENKINS_CRUMB_URL = "/crumbIssuer/api/json"
 
 logger = logging.getLogger(__name__)
 
