@@ -1,11 +1,11 @@
 """Controller del catalogo de scoops y su ciclo de vida en el cluster."""
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from kubernetes.client.exceptions import ApiException
 
 from app.core.errors import ConflictError
 from app.core.http import bool_arg, pagination, parse_body
-from app.modules.audits.service import AuditService
 from app.modules.cluster.service import K8sService
+from app.modules.configstore.service import ConfigStoreService
 from app.modules.scoops.deploy import DeployService
 from app.modules.scoops.manifest import ManifestService
 from app.modules.scoops.schema import (
@@ -58,6 +58,61 @@ def list_scoops():
         limit=result["limit"],
         pages=result["pages"],
     ).model_dump(mode="json"))
+
+
+@bp.get("/available-env-from")
+def available_env_from():
+    """Lista ConfigMaps y Secrets pre-existentes en un namespace para que el
+    usuario pueda seleccionarlos como refs `envFrom` al crear/editar un scoop.
+    ---
+    tags: [Scoops]
+    parameters:
+      - {name: namespace, in: query, type: string,
+        description: 'Namespace donde buscar; cae a DEFAULT_NAMESPACE si se omite'}
+      - {name: app, in: query, type: string,
+        description: 'Filtra por la label app.kubernetes.io/laurel-app del recurso'}
+      - {name: exclude_application, in: query, type: string,
+        description: 'Si llega y coincide con un recurso auto-detectado (<app>-config / <app>-secret), se omite para no duplicar la inyeccion automatica'}
+    responses:
+      200: {description: Lista unificada de CM y Secret con un campo kind}
+    """
+    namespace = (
+        request.args.get("namespace")
+        or current_app.config["DEFAULT_NAMESPACE"]
+    )
+    app_filter = request.args.get("app")
+    exclude_app = request.args.get("exclude_application")
+    cms = ConfigStoreService.list_configmaps(namespace, app_filter)
+    secrets = ConfigStoreService.list_secrets(namespace, app_filter)
+    items = []
+    for cm in cms:
+        items.append({
+            "type": "config_map",
+            "name": cm["name"],
+            "namespace": cm["namespace"],
+            "app": cm.get("app") or "",
+            "keys": cm.get("keys", []),
+        })
+    for s in secrets:
+        items.append({
+            "type": "secret",
+            "name": s["name"],
+            "namespace": s["namespace"],
+            "app": s.get("app") or "",
+            "keys": s.get("keys", []),
+        })
+    if exclude_app:
+        cm_default = ConfigStoreService.configmap_name_for(exclude_app)
+        secret_default = ConfigStoreService.secret_name_for(exclude_app)
+        items = [
+            it for it in items
+            if not (
+                (it["type"] == "config_map" and it["name"] == cm_default and it["app"] == exclude_app)
+                or (it["type"] == "secret" and it["name"] == secret_default and it["app"] == exclude_app)
+            )
+        ]
+    items.sort(key=lambda it: (it["type"], it["name"]))
+    return jsonify({"items": items, "namespace": namespace})
 
 
 @bp.post("")
@@ -175,7 +230,6 @@ def delete_scoop(scoop_id: int):
         kinds = ["CronJob"] if scoop.type == "cronjob" else ["Deployment"]
         if scoop.exposes_service and scoop.port:
             kinds.append("Service")
-            kinds.append("Ingress")
         deployed = []
         for kind in kinds:
             try:
@@ -306,47 +360,55 @@ def scoop_logs(scoop_id: int):
 
 @bp.get("/<int:scoop_id>/certificate")
 def scoop_certificate(scoop_id: int):
-    """Estado de la generacion del certificado TLS del scoop
+    """DEPRECATED: el certificado ahora se consulta por dominio.
+
+    Devuelve 410 Gone. El cliente debe usar
+    `GET /api/domains?scoop_id=<id>` para localizar el/los dominios del
+    scoop y luego `GET /api/domains/<domain_id>/certificate`.
     ---
     tags: [Scoops]
     parameters:
       - {name: scoop_id, in: path, required: true, type: integer}
-      - {name: namespace, in: query, type: string}
     responses:
-      200: {description: Estado del Certificate y retos ACME}
+      410: {description: Migrado a /api/domains/<id>/certificate}
     """
-    scoop = ScoopService.get(scoop_id)
-    return jsonify(DeployService.certificate_status(
-        scoop, request.args.get("namespace")
+    from flask import abort
+    abort(410, description=(
+        "El endpoint /api/scoops/<id>/certificate fue migrado. "
+        "Use GET /api/domains?scoop_id=<id> y luego "
+        "GET /api/domains/<domain_id>/certificate."
     ))
 
 
 @bp.get("/<int:scoop_id>/certificate/logs")
 def scoop_certificate_logs(scoop_id: int):
-    """Logs del controller de cert-manager para el certificado del scoop
+    """DEPRECATED: idem /certificate, migrado a /api/domains/<id>/certificate/logs
     ---
     tags: [Scoops]
-    parameters:
-      - {name: scoop_id, in: path, required: true, type: integer}
-      - {name: tail_lines, in: query, type: integer, default: 100}
     responses:
-      200: {description: Logs filtrados por certificado}
+      410: {description: Migrado a /api/domains/<id>/certificate/logs}
     """
-    scoop = ScoopService.get(scoop_id)
-    return jsonify(DeployService.certificate_logs(
-        scoop, tail_lines=request.args.get("tail_lines", 100, type=int)
+    from flask import abort
+    abort(410, description=(
+        "El endpoint /api/scoops/<id>/certificate/logs fue migrado. "
+        "Use GET /api/domains/<id>/certificate/logs."
     ))
 
 
 @bp.get("/<int:scoop_id>/audits")
 def scoop_audits(scoop_id: int):
-    """Historial de cambios del scoop
+    """DEPRECATED: el usuario pidio quitar la seccion de audits del detalle de scoop.
+
+    Devuelve 410 Gone. Los audits siguen disponibles via el endpoint
+    global `GET /api/audits?entity_type=scoop&entity_id=<id>` (o por
+    el listado de auditoria en la UI principal).
     ---
     tags: [Scoops]
-    parameters:
-      - {name: scoop_id, in: path, required: true, type: integer}
     responses:
-      200: {description: Eventos de auditoria}
+      410: {description: Migrado a /api/audits}
     """
-    ScoopService.get(scoop_id)
-    return jsonify(AuditService.get_by_entity("scoop", scoop_id))
+    from flask import abort
+    abort(410, description=(
+        "El endpoint /api/scoops/<id>/audits fue removido. "
+        "Use GET /api/audits?entity_type=scoop&entity_id=<id>."
+    ))

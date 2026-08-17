@@ -3,7 +3,7 @@ from flask import current_app
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import db
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError
 from app.modules.audits.service import AuditService
 from app.modules.scoops.model import Scoop
 from app.modules.scoops.schema import format_memory
@@ -13,8 +13,53 @@ _TRACKED_FIELDS = (
     "name", "application", "type", "status", "version", "is_productive",
     "requested_vcpu", "requested_memory", "limit_vcpu", "limit_memory",
     "min_replicas", "max_replicas", "url_registry", "port", "namespace", "schedule",
-    "container_port", "health_path",
+    "container_port", "health_path", "env_from",
 )
+
+_MAX_ENV_FROM = 50
+
+
+def _normalize_env_from(raw) -> list[dict]:
+    """Acepta una lista de dicts o ya normalizada y devuelve una lista unica
+    y determinista. Rechaza entradas mal formadas o que no sean CM/Secret.
+    El manifiesto es el sitio que valida la existencia en el cluster.
+
+    Dedup: dos entradas con el mismo (type, name, namespace) colisionan; mismo
+    `name` en distintos namespaces se mantienen (son recursos distintos en K8s).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AppError("env_from debe ser una lista", 400)
+    if len(raw) > _MAX_ENV_FROM:
+        raise AppError(
+            f"env_from no puede tener mas de {_MAX_ENV_FROM} entradas",
+            400,
+        )
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise AppError("Cada entrada de env_from debe ser un objeto", 400)
+        etype = item.get("type")
+        name = item.get("name")
+        if etype not in ("config_map", "secret"):
+            raise AppError(
+                f"env_from.type debe ser 'config_map' o 'secret', no {etype!r}",
+                400,
+            )
+        if not isinstance(name, str) or not name.strip():
+            raise AppError("env_from.name es obligatorio", 400)
+        namespace = item.get("namespace")
+        if namespace is not None and not isinstance(namespace, str):
+            raise AppError("env_from.namespace debe ser texto o null", 400)
+        clean_name = name.strip()
+        key = (etype, clean_name, namespace)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"type": etype, "name": clean_name, "namespace": namespace})
+    return out
 
 
 def _snapshot(scoop: Scoop) -> dict:
@@ -125,6 +170,7 @@ class ScoopService:
             "schedule": data.get("schedule"),
             "container_port": data.get("container_port") or current_app.config["CONTAINER_PORT"],
             "health_path": data.get("health_path") or "/",
+            "env_from": _normalize_env_from(data.get("env_from")),
         }
 
         scoop = Scoop(**payload)
@@ -169,6 +215,10 @@ class ScoopService:
             if mem is not None:
                 setattr(scoop, prefix, format_memory(mem[0], mem[1]))
 
+        # env_from: si viene en el body lo reemplazamos entero; si no, sin tocar.
+        if "env_from" in data and data["env_from"] is not None:
+            scoop.env_from = _normalize_env_from(data["env_from"])
+
         # Validacion cruzada: los campos pueden llegar sueltos en un update parcial.
         if scoop.max_replicas < scoop.min_replicas:
             db.session.rollback()
@@ -199,3 +249,21 @@ class ScoopService:
             db.session.commit()
             AuditService.log("status", "scoop", scoop.id, {"status": status}, old)
         return scoop
+
+    @staticmethod
+    def archive_for_application(application_slug: str) -> int:
+        """Marca todos los scoops con `application.slug == application_slug`
+        como `archived`. Retorna el numero de scoops actualizados.
+
+        Usado por `AppsService.archive_for_app`. El caller hace commit
+        si necesita; este helper hace su propio commit por scope.
+        """
+        from app.modules.scoops.model import STATUS_ARCHIVED
+
+        count = (
+            Scoop.query
+            .filter(Scoop.application.has(slug=application_slug))
+            .update({Scoop.status: STATUS_ARCHIVED}, synchronize_session=False)
+        )
+        db.session.commit()
+        return count

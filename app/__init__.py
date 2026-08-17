@@ -30,6 +30,8 @@ SWAGGER_TEMPLATE = {
         {"name": "Services", "description": "Services"},
         {"name": "Ingresses", "description": "Ingresses (Traefik)"},
         {"name": "ConfigStore", "description": "ConfigMaps y Secrets de aplicacion"},
+        {"name": "Apps", "description": "Applications de primer nivel (namespace dedicado)"},
+        {"name": "Domains", "description": "Subdominios public (uno por Scoop)"},
         {"name": "System", "description": "Secretos del backend y bootstrap"},
         {"name": "Audits", "description": "Historial de cambios"},
     ],
@@ -54,7 +56,9 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.configurator.records.model import Record  # noqa: F401
     from app.modules.configurator.schemas.model import Column, Schema  # noqa: F401
     from app.modules.users.model import User  # noqa: F401
+    from app.modules.apps.model import Application  # noqa: F401
     from app.modules.scoops.model import Scoop  # noqa: F401
+    from app.modules.domains.model import Domain  # noqa: F401
 
     with app.app_context():
         db.create_all()
@@ -71,6 +75,8 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.cluster import bp as cluster_bp
     from app.modules.configurator import bp as configurator_bp
     from app.modules.configstore import bp as configstore_bp
+    from app.modules.apps import bp as apps_bp
+    from app.modules.domains import bp as domains_bp
     from app.modules.scoops import bp as scoops_bp
     from app.modules.system import bp as system_bp
 
@@ -81,7 +87,7 @@ def create_app(config_class=Config) -> Flask:
 
     app.before_request(authenticate_request)
 
-    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, scoops_bp, system_bp):
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, domains_bp, scoops_bp, system_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)

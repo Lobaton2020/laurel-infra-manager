@@ -6,13 +6,15 @@ SCOOP_TYPES = ("api", "worker", "cronjob")
 STATUS_ACTIVE = "active"
 STATUS_PENDING = "pending"
 STATUS_ERROR = "error"
-SCOOP_STATUSES = (STATUS_ACTIVE, STATUS_PENDING, STATUS_ERROR)
+STATUS_ARCHIVED = "archived"
+SCOOP_STATUSES = (STATUS_ACTIVE, STATUS_PENDING, STATUS_ERROR, STATUS_ARCHIVED)
 
 # Traduccion para el frontend; el valor crudo se mantiene estable en BD.
 STATUS_LABELS = {
     STATUS_ACTIVE: "Activo",
     STATUS_PENDING: "Pendiente",
     STATUS_ERROR: "Con errores",
+    STATUS_ARCHIVED: "Archivado",
 }
 
 
@@ -57,6 +59,22 @@ class Scoop(db.Model):
     # Path HTTP de readiness/liveness. Si está, K8s los genera sobre container_port.
     # Si no, K8s no sabe si el pod está vivo y nunca reiniciará por fallos.
     health_path = db.Column(db.String(255))
+
+    # --- ConfigMaps/Secrets adicionales (envFrom explicito) ---
+    # Lista de refs [{type: 'config_map'|'secret', name, namespace?}] que el
+    # scoop quiere inyectar en su contenedor ademas de los auto-detectados por
+    # `application`. Permite reutilizar recursos ya creados por ConfigStore
+    # sin duplicarlos. Se almacena como JSON para no crecer el esquema.
+    env_from = db.Column(db.JSON, default=list, nullable=False)
+
+    # --- Vinculacion con Application (opcional, backwards compat) ---
+    # Nullable: los scoops legacy (sin Application) siguen funcionando en
+    # el namespace default. El namespace se deriva del slug de la app
+    # salvo override explicito en `namespace`.
+    application_id = db.Column(
+        db.Integer, db.ForeignKey("applications.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
 
     created_at = db.Column(db.DateTime, default=utcnow)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)

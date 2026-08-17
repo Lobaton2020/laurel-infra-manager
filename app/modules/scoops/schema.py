@@ -9,6 +9,26 @@ from app.modules.scoops.model import STATUS_LABELS
 ComponentType = Literal["api", "worker", "cronjob"]
 ScoopStatus = Literal["active", "pending", "error"]
 MemoryUnit = Literal["K", "M", "G", "T"]
+EnvFromKind = Literal["config_map", "secret"]
+
+
+class EnvFromRef(BaseModel):
+    """Una referencia a un ConfigMap o Secret del cluster que se inyecta via
+    `envFrom` en los contenedores del scoop. `name` es obligatorio; `namespace`
+    cae al namespace del scoop si no se especifica."""
+    type: EnvFromKind
+    name: str = Field(..., min_length=1, max_length=253)
+    namespace: Optional[str] = Field(None, max_length=63)
+
+    @field_validator("name", "namespace")
+    @classmethod
+    def _check_dns(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not DNS_LABEL.match(v):
+            raise ValueError(f"'{v}' no es DNS-1123 valido (minusculas, digitos y '-', "
+                             "empezando y terminando en alfanumerico)")
+        return v
 
 # Un nombre de componente termina en labels y nombres de recursos: debe ser DNS-1123.
 DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -100,6 +120,8 @@ class ScoopBase(BaseModel):
     namespace: Optional[str] = Field(None, max_length=63)
     schedule: Optional[str] = Field(None, max_length=100)
 
+    env_from: list[EnvFromRef] = Field(default_factory=list)
+
     # NOTA: `container_port` y `health_path` los asigna el servidor desde la
     # config global. Si en el futuro hay que exponerlos al usuario, se vuelven
     # a anadir aqui.
@@ -171,6 +193,7 @@ class ScoopUpdate(BaseModel):
     url_registry: Optional[str] = Field(None, min_length=1, max_length=255)
     namespace: Optional[str] = Field(None, max_length=63)
     schedule: Optional[str] = Field(None, max_length=100)
+    env_from: Optional[list[EnvFromRef]] = None
 
     # NOTA: container_port y health_path son solo lectura en la respuesta.
     # Los asigna el servidor desde config; el cliente no los edita.
@@ -227,32 +250,12 @@ class ScoopResponse(BaseModel):
     container_port: Optional[int] = None
     health_path: Optional[str] = None
 
+    env_from: list[EnvFromRef] = Field(default_factory=list)
+
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
-
-    @computed_field
-    @property
-    def host(self) -> Optional[str]:
-        """Subdominio publico: `<name>.<INGRESS_BASE_DOMAIN>` o null si no aplica."""
-        if not self._exposes_service or not self.port:
-            return None
-        from flask import current_app
-
-        domain = current_app.config["INGRESS_BASE_DOMAIN"]
-        return f"{self.name}.{domain}"
-
-    @computed_field
-    @property
-    def url(self) -> Optional[str]:
-        """URL https del scoop, o None si no se publica."""
-        host = self.host
-        return f"https://{host}/" if host else None
-
-    @property
-    def _exposes_service(self) -> bool:
-        return self.type == "api"
 
     @classmethod
     def from_scoop(cls, scoop) -> "ScoopResponse":
@@ -282,14 +285,10 @@ class ScoopResponse(BaseModel):
             schedule=scoop.schedule,
             container_port=scoop.container_port,
             health_path=scoop.health_path,
+            env_from=[EnvFromRef(**r) for r in (scoop.env_from or [])],
             created_at=scoop.created_at,
             updated_at=scoop.updated_at,
         )
-
-    @computed_field
-    @property
-    def status_label(self) -> str:
-        return STATUS_LABELS.get(self.status, self.status)
 
 
 class ScoopListResponse(BaseModel):

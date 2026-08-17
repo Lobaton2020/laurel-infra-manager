@@ -10,7 +10,12 @@ Convenciones:
   - La imagen es `url_registry` tal cual (ya incluye tag).
   - El contenedor escucha siempre en CONTAINER_PORT; el Service expone un 3xxx
     autoasignado y hace targetPort al CONTAINER_PORT.
-  - No se generan Ingress: el Service LoadBalancer publica por IP de MetalLB/Traefik.
+
+Importante: este modulo NO genera Ingress ni Certificate. Esos recursos
+son generados por `app.modules.domains.service.DomainService` cuando se
+despliega un `Domain` asociado al scoop. Un scoop sin Domain queda
+interno (accesible solo dentro del cluster por el Service ClusterIP o
+LoadBalancer, sin DNS publico).
 """
 import re
 
@@ -201,99 +206,13 @@ class ManifestService:
         }
 
     @staticmethod
-    def build_ingress(scoop, namespace: str) -> dict:
-        """Publica el Service del scoop bajo su subdominio.
-
-        Un scoop 'api' con `port` asignado se expone como `<name>.<INGRESS_BASE_DOMAIN>`.
-        El DNS del cluster es un wildcard, asi que esto no requiere registrar nada.
-        El Certificate TLS se crea como recurso aparte (build_certificate), por lo
-        que aqui NO ponemos la anotacion cert-manager.io/cluster-issuer: con ella
-        el ingress-shim crearia su propio Certificate con el mismo nombre y
-        colisionaria con el nuestro (409 already exists).
-        """
-        from flask import current_app
-
-        domain = current_app.config["INGRESS_BASE_DOMAIN"]
-        host = f"{scoop.name}.{domain}"
-        return {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "Ingress",
-            "metadata": {
-                "name": scoop.name,
-                "namespace": namespace,
-                "labels": ManifestService.labels(scoop),
-            },
-            "spec": {
-                "ingressClassName": current_app.config["INGRESS_CLASS"],
-                "rules": [{
-                    "host": host,
-                    "http": {
-                        "paths": [{
-                            "path": "/",
-                            "pathType": "Prefix",
-                            "backend": {
-                                "service": {
-                                    "name": scoop.name,
-                                    "port": {"number": scoop.port},
-                                },
-                            },
-                        }],
-                    },
-                }],
-                # Certificados separados por app: cada scoop tiene su secreto TLS.
-                "tls": [{
-                    "hosts": [host],
-                    "secretName": f"{scoop.name}-tls",
-                }],
-            },
-        }
-
-    @staticmethod
-    def build_certificate(scoop, namespace: str) -> dict:
-        """Certificado Let's Encrypt explicito para el host del scoop.
-
-        Se crea como recurso Certificate propio (mismo patron que el resto de
-        apps del cluster) en lugar de depender del ingress-shim de cert-manager:
-        asi la emision del certificado no queda condicionada a que ese controller
-        traduzca la anotacion del Ingress.
-        """
-        from flask import current_app
-
-        host = ManifestService.ingress_host(scoop, namespace)
-        if not host:
-            raise ValueError("Un scoop sin host publico no puede tener certificado")
-        issuer = current_app.config["CERT_MANAGER_CLUSTER_ISSUER"]
-        return {
-            "apiVersion": "cert-manager.io/v1",
-            "kind": "Certificate",
-            "metadata": {
-                "name": f"{scoop.name}-tls",
-                "namespace": namespace,
-                "labels": ManifestService.labels(scoop),
-            },
-            "spec": {
-                "secretName": f"{scoop.name}-tls",
-                "issuerRef": {
-                    "kind": "ClusterIssuer",
-                    "name": issuer,
-                },
-                "dnsNames": [host],
-            },
-        }
-
-    @staticmethod
-    def ingress_host(scoop, namespace: str | None = None) -> str | None:
-        """Subdominio publico del scoop, o None si no se publica (worker/cronjob)."""
-        if not scoop.exposes_service or not scoop.port:
-            return None
-        from flask import current_app
-
-        domain = current_app.config["INGRESS_BASE_DOMAIN"]
-        return f"{scoop.name}.{domain}"
-
-    @staticmethod
     def build(scoop, namespace: str | None = None) -> list[dict]:
-        """Manifiestos en orden de aplicacion (dependencias primero)."""
+        """Manifiestos en orden de aplicacion (dependencias primero).
+
+        Genera solo los recursos del workload. NO incluye Ingress ni
+        Certificate: esos son responsabilidad de `DomainService` y se
+        aplican por separado al deploy del `Domain` asociado al scoop.
+        """
         ns = ManifestService.namespace_for(scoop, namespace)
 
         # Inyeccion best-effort: si en el namespace hay un ConfigMap/Secret
@@ -313,13 +232,6 @@ class ManifestService:
         # Todo scoop tipo 'api' genera Service: el container_port lo fija el server.
         if scoop.exposes_service:
             manifests.append(ManifestService.build_service(scoop, ns))
-
-        # Y su Ingress con subdominio propio + TLS (LetsEncrypt via cert-manager).
-        # Solo aplica a 'api': un Service sin port no tiene backend que publicar.
-        if scoop.exposes_service and scoop.port:
-            manifests.append(ManifestService.build_ingress(scoop, ns))
-            # Certificado TLS explicito: no dependemos del ingress-shim.
-            manifests.append(ManifestService.build_certificate(scoop, ns))
 
         # Sin margen de escalado un HPA no aporta nada y ademas pelearia con replicas.
         if scoop.max_replicas > scoop.min_replicas:
@@ -352,40 +264,78 @@ class ManifestService:
         """Mira en el cluster si hay ConfigMap/Secret de la app; devuelve la lista
         de entradas `envFrom` que hay que agregar al contenedor.
 
-        Best-effort: cualquier fallo del API server (cluster apagado, sin red)
-        devuelve lista vacia para que la generacion de manifiestos no se rompa.
+        Ademas del auto-detectado por `application`, incluye las refs que el
+        usuario selecciono en `Scoop.env_from`. Si una ref no existe en el
+        cluster, simplemente se omite (best-effort); no rompemos la generacion
+        para que la UI siga trabajando aunque haya drift. El orden es estable
+        y los duplicados (mismo recurso por auto-detect y por ref explicita)
+        se deduplican por (kind, name, namespace).
         """
-        app = getattr(scoop, "application", None)
-        if not app:
-            return []
-
         try:
             from app.core.k8s import get_clients
             from kubernetes.client.exceptions import ApiException
             from app.modules.configstore.service import ConfigStoreService
 
             c = get_clients()
-            cm_name = ConfigStoreService.configmap_name_for(app)
-            secret_name = ConfigStoreService.secret_name_for(app)
-
             env_from: list[dict] = []
-            try:
-                c.core.read_namespaced_config_map(cm_name, namespace)
-                env_from.append({"configMapRef": {"name": cm_name}})
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
-            try:
-                c.core.read_namespaced_secret(secret_name, namespace)
-                env_from.append({"secretRef": {"name": secret_name}})
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
+            seen: set[tuple[str, str]] = set()
+
+            def add(kind: str, name: str, ns: str):
+                key = (kind, name)
+                if key in seen:
+                    return
+                seen.add(key)
+                if kind == "config_map":
+                    env_from.append({"configMapRef": {"name": name}})
+                else:
+                    env_from.append({"secretRef": {"name": name}})
+
+            # 1) Auto-detectado por la convencion `<application>-config` /
+            #    `<application>-secret` (no cambia vs antes).
+            app = getattr(scoop, "application", None)
+            if app:
+                cm_name = ConfigStoreService.configmap_name_for(app)
+                secret_name = ConfigStoreService.secret_name_for(app)
+                try:
+                    c.core.read_namespaced_config_map(cm_name, namespace)
+                    add("config_map", cm_name, namespace)
+                except ApiException as exc:
+                    if exc.status != 404:
+                        raise
+                try:
+                    c.core.read_namespaced_secret(secret_name, namespace)
+                    add("secret", secret_name, namespace)
+                except ApiException as exc:
+                    if exc.status != 404:
+                        raise
+
+            # 2) Refs explicitas seleccionadas por el usuario al crear el scoop.
+            for ref in (getattr(scoop, "env_from", None) or []):
+                kind = ref.get("type")
+                name = ref.get("name")
+                ns = ref.get("namespace") or namespace
+                if not kind or not name:
+                    continue
+                if kind not in ("config_map", "secret"):
+                    continue
+                try:
+                    if kind == "config_map":
+                        c.core.read_namespaced_config_map(name, ns)
+                    else:
+                        c.core.read_namespaced_secret(name, ns)
+                except ApiException as exc:
+                    if exc.status != 404:
+                        raise
+                    # Si la ref no existe (aun no creada, o cluster disponible
+                    # en otra zona), la saltamos para no romper el manifesto.
+                    continue
+                add(kind, name, ns)
             return env_from
         except Exception:  # noqa: BLE001 - best-effort, no debe romper la generacion
             import logging
             logging.getLogger(__name__).debug(
-                "envFrom no resuelto para app=%s ns=%s", app, namespace,
+                "envFrom no resuelto para app=%s ns=%s",
+                getattr(scoop, "application", None), namespace,
                 exc_info=True,
             )
             return []

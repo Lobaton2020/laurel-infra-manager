@@ -1,4 +1,8 @@
 """Tests del catalogo de scoops (no tocan el cluster)."""
+import pytest
+
+from app.core.errors import AppError
+from app.modules.scoops import service as scoops_service
 
 
 class TestCreate:
@@ -9,7 +13,7 @@ class TestCreate:
         assert data["port"] == 3000
         assert data["namespace"] == "prod"
         assert data["status"] == "pending"
-        assert data["status_label"] == "Pendiente"
+        # status_label se elimino del response: el frontend debe mapearlo localmente.
 
     def test_ports_are_sequential(self, client, scoop_payload):
         client.post("/api/scoops", json=scoop_payload)
@@ -182,11 +186,17 @@ class TestReadUpdateDelete:
 
 
 class TestAudit:
-    def test_mutations_are_audited(self, client, scoop_payload):
+    """Los audits de scoops ahora se consultan via /api/audits.
+    El endpoint /api/scoops/<id>/audits fue removido por peticion del usuario.
+    """
+
+    def test_mutations_are_audited_via_global_endpoint(self, client, scoop_payload):
         created = client.post("/api/scoops", json=scoop_payload).get_json()
         client.put(f"/api/scoops/{created['id']}", json={"version": "2.0.0"})
 
-        audits = client.get(f"/api/scoops/{created['id']}/audits").get_json()
+        audits = client.get(
+            f"/api/audits?entity_type=scoop&entity_id={created['id']}"
+        ).get_json()["items"]
         actions = [a["action"] for a in audits]
         assert "create" in actions
         assert "update" in actions
@@ -194,3 +204,126 @@ class TestAudit:
         update = next(a for a in audits if a["action"] == "update")
         assert update["old_data"]["version"] == "1.4.2"
         assert update["new_data"]["version"] == "2.0.0"
+
+    def test_scoop_audits_endpoint_returns_410(self, client, scoop_payload):
+        created = client.post("/api/scoops", json=scoop_payload).get_json()
+        resp = client.get(f"/api/scoops/{created['id']}/audits")
+        assert resp.status_code == 410
+
+
+class TestEnvFromHelper:
+    """Cobertura del helper _normalize_env_from."""
+
+    def test_none_returns_empty_list(self):
+        assert scoops_service._normalize_env_from(None) == []
+
+    def test_empty_list_returns_empty_list(self):
+        assert scoops_service._normalize_env_from([]) == []
+
+    def test_keeps_valid_entries_in_order(self):
+        out = scoops_service._normalize_env_from([
+            {"type": "config_map", "name": "cm-a"},
+            {"type": "secret", "name": "secret-a"},
+            {"type": "secret", "name": "secret-a", "namespace": "user-apps"},
+        ])
+        assert len(out) == 3
+        assert (out[0]["type"], out[0]["name"], out[0]["namespace"]) == (
+            "config_map", "cm-a", None,
+        )
+        assert out[1]["namespace"] is None
+        assert out[2]["namespace"] == "user-apps"
+
+    def test_dedupes_same_kind_and_name(self):
+        out = scoops_service._normalize_env_from([
+            {"type": "secret", "name": "tok"},
+            {"type": "secret", "name": "tok"},
+            {"type": "secret", "name": "tok", "namespace": "prod"},
+        ])
+        # name+kind unico; el mismo name en otro namespace NO se dedupea
+        assert len(out) == 2
+        assert {o["namespace"] for o in out} == {None, "prod"}
+
+    def test_strips_whitespace_in_name(self):
+        out = scoops_service._normalize_env_from([
+            {"type": "config_map", "name": "  shared-vars  "},
+        ])
+        assert out[0]["name"] == "shared-vars"
+
+    def test_rejects_non_list(self):
+        with pytest.raises(AppError):
+            scoops_service._normalize_env_from({"type": "config_map", "name": "x"})
+
+    def test_rejects_unknown_kind(self):
+        with pytest.raises(AppError):
+            scoops_service._normalize_env_from([
+                {"type": "service", "name": "x"},
+            ])
+
+    def test_rejects_missing_name(self):
+        with pytest.raises(AppError):
+            scoops_service._normalize_env_from([
+                {"type": "config_map", "name": ""},
+            ])
+
+    def test_rejects_too_many_entries(self):
+        with pytest.raises(AppError):
+            scoops_service._normalize_env_from(
+                [{"type": "config_map", "name": f"cm-{i}"} for i in range(51)]
+            )
+
+
+class TestEnvFromCrud:
+    def test_create_persists_env_from(self, client, scoop_payload):
+        body = {
+            **scoop_payload,
+            "env_from": [
+                {"type": "config_map", "name": "shared-vars"},
+                {"type": "secret", "name": "shared-tokens", "namespace": "prod"},
+            ],
+        }
+        response = client.post("/api/scoops", json=body)
+        assert response.status_code == 201
+        data = response.get_json()
+        kinds = [(r["type"], r["name"]) for r in data["env_from"]]
+        assert ("config_map", "shared-vars") in kinds
+        assert ("secret", "shared-tokens") in kinds
+
+    def test_create_without_env_from_defaults_to_empty(self, client, scoop_payload):
+        response = client.post("/api/scoops", json=scoop_payload)
+        assert response.status_code == 201
+        assert response.get_json()["env_from"] == []
+
+    def test_update_replaces_env_from(self, client, scoop_payload):
+        created = client.post(
+            "/api/scoops",
+            json={**scoop_payload, "env_from": [
+                {"type": "config_map", "name": "old-cm"},
+            ]},
+        ).get_json()
+        assert client.put(
+            f"/api/scoops/{created['id']}",
+            json={"env_from": [{"type": "secret", "name": "new-tok"}]},
+        ).status_code == 200
+        body = client.get(f"/api/scoops/{created['id']}").get_json()
+        # La BD guarda `namespace=None` y Pydantic V2 lo emite como `null`;
+        # comparamos por tipo+name para ser robustos.
+        assert [(r["type"], r["name"]) for r in body["env_from"]] == \
+            [("secret", "new-tok")]
+
+    def test_update_omitting_env_from_keeps_existing(self, client, scoop_payload):
+        created = client.post(
+            "/api/scoops",
+            json={**scoop_payload, "env_from": [
+                {"type": "config_map", "name": "shared-vars"},
+            ]},
+        ).get_json()
+        client.put(f"/api/scoops/{created['id']}", json={"version": "2.0.0"})
+        body = client.get(f"/api/scoops/{created['id']}").get_json()
+        # Sin 'env_from' en el payload no se toca.
+        assert [(r["type"], r["name"]) for r in body["env_from"]] == \
+            [("config_map", "shared-vars")]
+
+    def test_create_rejects_malformed_env_from(self, client, scoop_payload):
+        body = {**scoop_payload, "env_from": [{"type": "config_map"}]}
+        response = client.post("/api/scoops", json=body)
+        assert response.status_code in (400, 422)

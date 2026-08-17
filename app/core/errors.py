@@ -5,6 +5,7 @@ import logging
 from flask import jsonify
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError
+from werkzeug.exceptions import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -87,5 +88,9 @@ def register_error_handlers(app):
 
     @app.errorhandler(Exception)
     def handle_unexpected(exc: Exception):
+        # Werkzeug HTTPException (abort(410), abort(404), etc.) ya trae su
+        # codigo y mensaje: lo dejamos pasar al handler por defecto.
+        if isinstance(exc, HTTPException):
+            return exc
         logger.exception("Error no controlado")
         return jsonify({"error": "Error interno del servidor"}), 500

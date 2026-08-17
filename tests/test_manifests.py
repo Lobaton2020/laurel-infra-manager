@@ -46,8 +46,10 @@ class TestApiScoop:
         with app.app_context():
             return by_kind(ManifestService.build(make_scoop()))
 
-    def test_generates_deployment_service_ingress_and_certificate(self, manifests):
-        assert set(manifests) == {"Deployment", "Service", "Ingress", "Certificate"}
+    def test_generates_deployment_service_only(self, manifests):
+        # Tras el cambio a Domain como recurso separado: el scoop NO genera
+        # Ingress ni Certificate. Esos vienen del deploy de un Domain.
+        assert set(manifests) == {"Deployment", "Service"}
 
     def test_image_is_url_registry_verbatim(self, manifests):
         container = manifests["Deployment"]["spec"]["template"]["spec"]["containers"][0]
@@ -87,30 +89,14 @@ class TestApiScoop:
         assert container["readinessProbe"]["httpGet"]["port"] == 80
         assert container["livenessProbe"]["httpGet"]["path"] == "/"
 
-    def test_ingress_publishes_scoop_subdomain(self, manifests):
-        ingress = manifests["Ingress"]
-        assert ingress["spec"]["ingressClassName"] == "traefik"
-        rule = ingress["spec"]["rules"][0]
-        assert rule["host"] == "manejo-finanzas.andreslobaton.top"
-        path = rule["http"]["paths"][0]
-        assert path["path"] == "/"
-        assert path["pathType"] == "Prefix"
-        assert path["backend"]["service"]["name"] == "manejo-finanzas"
-        assert path["backend"]["service"]["port"]["number"] == 3001
-        assert "cert-manager.io/cluster-issuer" not in ingress["metadata"].get("annotations", {})
-        assert ingress["spec"]["tls"][0]["hosts"] == ["manejo-finanzas.andreslobaton.top"]
-        assert ingress["spec"]["tls"][0]["secretName"] == "manejo-finanzas-tls"
-
-    def test_certificate_requests_tls_for_scoop_host(self, manifests):
-        cert = manifests["Certificate"]
-        assert cert["apiVersion"] == "cert-manager.io/v1"
-        assert cert["metadata"]["name"] == "manejo-finanzas-tls"
-        assert cert["spec"]["secretName"] == "manejo-finanzas-tls"
-        assert cert["spec"]["issuerRef"] == {
-            "kind": "ClusterIssuer",
-            "name": "letsencrypt-prod",
-        }
-        assert cert["spec"]["dnsNames"] == ["manejo-finanzas.andreslobaton.top"]
+    def test_does_not_generate_ingress_or_certificate(self, manifests):
+        # Aclaracion arquitectonica: el scoop ya no autogenera Ingress ni
+        # Certificate. Esos recursos los emite `DomainService` cuando se
+        # despliega un Domain asociado al scoop.
+        # Test de regresion: si esto vuelve a aparecer, alguien ha vuelto
+        # a meter la dependencia que el usuario pidio quitar.
+        assert "Ingress" not in manifests
+        assert "Certificate" not in manifests
 
     def test_selector_is_stable_subset_of_labels(self, manifests):
         selector = manifests["Deployment"]["spec"]["selector"]["matchLabels"]
