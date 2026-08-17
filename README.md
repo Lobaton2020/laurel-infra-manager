@@ -109,3 +109,28 @@ kubectl get deploy,svc -n prod
 kubectl rollout status deploy/laurel-infra-manager -n prod
 curl http://192.168.20.240:3006/api/health
 ```
+
+## DNS override (coredns-custom)
+
+Subdominios publicos que deben resolver dentro del cluster (HTTP-01 de
+cert-manager). La API parchea este ConfigMap al desplegar; para agregar uno
+manualmente en el nodo, sin pisar las entradas existentes:
+
+```bash
+sudo kubectl -n kube-system get configmap coredns-custom -o yaml \
+  | sed '0,/192.168.20.240 tmp.andreslobaton.top/s//&\n        192.168.20.240 <dominio>.andreslobaton.top/' \
+  | sudo kubectl apply -f - \
+  && sudo kubectl -n kube-system rollout restart deployment coredns
+```
+
+Equivalente por la app (idempotente, no necesita acceso al nodo):
+
+```bash
+.venv/bin/python -c "
+from app import create_app
+from app.modules.dns.service import ClusterDNSService
+app = create_app()
+app.app_context().push()
+print(ClusterDNSService.add('<dominio>.andreslobaton.top', '192.168.20.240'))
+"
+```
