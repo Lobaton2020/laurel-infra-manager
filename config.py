@@ -72,6 +72,16 @@ class Config:
     DNS_OVERRIDE_LAN_IP = os.environ.get("DNS_OVERRIDE_LAN_IP", "192.168.20.240")
     DNS_OVERRIDE_ZONE = os.environ.get("DNS_OVERRIDE_ZONE", "andreslobaton.top")
 
+    # --- Integraciones externas: Jenkins + webhook GitHub ---
+    # Jenkins corre como pod en el namespace prod; el build token se guarda
+    # en el system secret `jenkins_token` (ver MANAGED en system/service.py).
+    JENKINS_URL = os.environ.get("JENKINS_URL", "http://jenkins:8080")
+    JENKINS_USER = os.environ.get("JENKINS_USER", "admin")
+    JENKINS_BUILD_TOKEN_SECRET = "jenkins_token"
+    # Secreto compartido con GitHub para firmar los payloads del webhook
+    # (header X-Hub-Signature-256). Vacío = webhook deshabilitado (503).
+    GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+
     # --- Base de datos ---
     DB_TYPE = os.environ.get("DB_TYPE", "sqlite")
 

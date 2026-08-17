@@ -92,6 +92,7 @@ def public_path(path: str) -> bool:
     public_prefixes = (
         "/api/health",
         "/api/auth",
+        "/api/webhooks",
         "/apidocs",
         "/api/docs",
         "/flasgger",

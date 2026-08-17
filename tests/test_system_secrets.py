@@ -89,6 +89,7 @@ def fake_cluster(monkeypatch):
     core._put("prod", "laurel-integrations", {
         "github-pat": _b64(""),
         "docker-pat": _b64(""),
+        "jenkins-token": _b64(""),
     })
 
     monkeypatch.setattr("app.core.k8s.get_clients", lambda: fake)
@@ -138,8 +139,8 @@ class TestListManaged:
         assert r.status_code == 200
         items = r.get_json()["items"]
         ids = {it["id"] for it in items}
-        # 4 secretos: 2 originales + github_pat + docker_pat
-        assert ids == {"laurel-secrets", "laurel-kubeconfig", "github_pat", "docker_pat"}
+        # 5 secretos: 2 originales + github_pat + docker_pat + jenkins_token
+        assert ids == {"laurel-secrets", "laurel-kubeconfig", "github_pat", "docker_pat", "jenkins_token"}
         # Solo campos meta, no exponemos los valores de las claves.
         for item in items:
             assert "content" not in item

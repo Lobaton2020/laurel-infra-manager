@@ -64,6 +64,13 @@ MANAGED: dict[str, ManagedSecret] = {
         kind="text",
         deployment="laurel-infra-manager",
     ),
+    "jenkins_token": ManagedSecret(
+        namespace="prod",
+        name="laurel-integrations",
+        key="jenkins-token",
+        kind="text",
+        deployment="laurel-infra-manager",
+    ),
 }
 
 
