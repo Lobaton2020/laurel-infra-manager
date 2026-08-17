@@ -89,6 +89,15 @@ class Config:
     # (header X-Hub-Signature-256). Vacío = webhook deshabilitado (503).
     GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
+    # --- Integraciones: GitHub + Docker Hub repos ---- 
+    # Modo legacy: los PATs se leen del .env. En el cluster prod tambien se
+    # pueden guardar como system secrets (github_pat / docker_pat) y el
+    # servicio de integracion los usa como fallback si la env esta vacia.
+    GITHUB_ORG = os.environ.get("GITHUB_ORG", "laurel-applications")
+    GITHUB_PAT = os.environ.get("GITHUB_PAT", "")
+    DOCKER_HUB_NAMESPACE = os.environ.get("DOCKER_HUB_NAMESPACE", "aflobaton")
+    DOCKER_HUB_TOKEN = os.environ.get("DOCKER_HUB_TOKEN", "")
+
     # --- Base de datos ---
     DB_TYPE = os.environ.get("DB_TYPE", "sqlite")
 

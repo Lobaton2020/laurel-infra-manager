@@ -29,7 +29,12 @@ _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def _get_pat() -> str:
-    """Lee el PAT del system secret `github_pat`. Lanza 503 si no esta."""
+    """Lee el PAT de `GITHUB_PAT` (.env / modo legacy). Si esta vacio,
+    intenta el system secret `github_pat` del cluster (prod). 503 si no hay."""
+    from flask import current_app
+    pat = (current_app.config.get("GITHUB_PAT") or "").strip()
+    if pat:
+        return pat
     from app.modules.system.service import SystemSecretService
     try:
         content = SystemSecretService.get_content("github_pat")["content"]
@@ -37,14 +42,14 @@ def _get_pat() -> str:
         if exc.status_code == 404:
             raise AppError(
                 "GitHub PAT no configurado. "
-                "Configurelo en PUT /api/system/secrets/github_pat",
+                "Configurelo en .env (GITHUB_PAT) o en PUT /api/system/secrets/github_pat",
                 status_code=503,
             )
         raise
     pat = (content or "").strip()
     if not pat:
         raise AppError(
-            "GitHub PAT vacio. Configurelo en /api/system/secrets/github_pat",
+            "GitHub PAT vacio. Configurelo en .env (GITHUB_PAT)",
             status_code=503,
         )
     return pat
@@ -52,7 +57,7 @@ def _get_pat() -> str:
 
 def _get_org() -> str:
     from flask import current_app
-    return current_app.config.get("GITHUB_ORG", DEFAULT_ORG)
+    return current_app.config.get("GITHUB_ORG") or DEFAULT_ORG
 
 
 def _repo_name(slug: str) -> str:

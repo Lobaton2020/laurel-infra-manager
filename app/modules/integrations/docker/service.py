@@ -47,11 +47,16 @@ def _repo_name(slug: str) -> str:
 
 def _get_namespace() -> str:
     from flask import current_app
-    return current_app.config.get("DOCKER_HUB_NAMESPACE", DEFAULT_NAMESPACE)
+    return current_app.config.get("DOCKER_HUB_NAMESPACE") or DEFAULT_NAMESPACE
 
 
 def _get_pat() -> str | None:
-    """Lee el PAT del system secret `docker_pat`. None si no esta."""
+    """Lee el token de `DOCKER_HUB_TOKEN` (.env / modo legacy). Si esta vacio,
+    intenta el system secret `docker_pat` del cluster (prod). None si no hay."""
+    from flask import current_app
+    pat = (current_app.config.get("DOCKER_HUB_TOKEN") or "").strip()
+    if pat:
+        return pat
     from app.modules.system.service import SystemSecretService
     try:
         content = SystemSecretService.get_content("docker_pat")["content"]
