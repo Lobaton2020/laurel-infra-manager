@@ -50,6 +50,9 @@ def github_webhook():
     if not secret:
         return _signature_error("webhook secret not configured", 503)
 
+    # Leer el body crudo ANTES de consumir el stream con get_json()
+    body = request.get_data()
+
     payload = request.get_json(silent=True)
     if payload is None:
         # GitHub puede enviar el payload como form-urlencoded (campo `payload`).
@@ -61,7 +64,7 @@ def github_webhook():
         return _signature_error("invalid payload", 400)
 
     signature = request.headers.get("X-Hub-Signature-256", "")
-    if not _verify_signature(secret, request.get_data(), signature):
+    if not _verify_signature(secret, body, signature):
         return _signature_error("invalid signature", 401)
 
     ref = payload.get("ref", "")
