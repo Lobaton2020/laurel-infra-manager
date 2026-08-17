@@ -167,17 +167,18 @@ def update_app(app_id: int):
 
 @bp.delete("/<int:app_id>")
 def delete_app(app_id: int):
-    """Soft-delete de la Application (no toca el cluster).
+    """Hard-delete de la Application + limpieza absoluta.
 
-    Para borrar el namespace completo usar el flujo de force-delete que
-    vive en otra fase.
+    Borra el namespace K8s (`user-apps-<slug>` con cascade de todos sus
+    recursos), el repo GitHub, el paquete GHCR y el registro en BD. Antes
+    guarda un snapshot completo en `app_deletion_logs` para trazabilidad.
     ---
     tags: [Apps]
     parameters:
       - {name: app_id, in: path, required: true, type: integer}
     responses:
-      200: {description: Application soft-deleted}
+      200: {description: Application eliminada}
       404: {description: No existe}
     """
-    app = AppsService.soft_delete(app_id)
+    app = AppsService.delete(app_id)
     return jsonify({"deleted": app.id, "slug": app.slug})

@@ -85,15 +85,29 @@ class TestApplicationUpdate:
         assert r.get_json()["docker_image_base"] == "custom/namespace/app"
 
 
-class TestApplicationSoftDelete:
-    def test_soft_delete_hides_from_list(self, client, app_payload):
+class TestApplicationDelete:
+    def test_delete_hides_from_list(self, client, app_payload):
         created = client.post("/api/apps", json=app_payload).get_json()
         client.delete(f"/api/apps/{created['id']}")
         listed = client.get("/api/apps").get_json()["items"]
         assert all(a["id"] != created["id"] for a in listed)
 
-    def test_soft_delete_then_get_returns_404(self, client, app_payload):
+    def test_delete_then_get_returns_404(self, client, app_payload):
         created = client.post("/api/apps", json=app_payload).get_json()
         client.delete(f"/api/apps/{created['id']}")
         r = client.get(f"/api/apps/{created['id']}")
         assert r.status_code == 404
+
+class TestApplicationHardDeleteReuseSlug:
+    """Hard delete libera name+slug para re-crear."""
+
+    def test_can_recreate_app_with_same_name_after_delete(self, client, app_payload):
+        r1 = client.post("/api/apps", json=app_payload).get_json()
+        d = client.delete(f"/api/apps/{r1['id']}")
+        assert d.status_code == 200
+        # Mismo name deberia poder crearse de nuevo (ya no hay unique conflict).
+        r2 = client.post("/api/apps", json=app_payload)
+        assert r2.status_code == 201, r2.get_json()
+        new = r2.get_json()
+        assert new["slug"] == r1["slug"]
+        assert new["name"] == r1["name"]

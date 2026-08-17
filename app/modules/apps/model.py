@@ -68,7 +68,8 @@ class Application(db.Model):
     )
     events = db.relationship(
         "AppEvent", backref="application", lazy="selectin",
-        order_by="AppEvent.id.asc()", passive_deletes=True,
+        order_by="AppEvent.id.asc()",
+        cascade="all, delete-orphan", passive_deletes=True,
     )
 
     def __repr__(self) -> str:

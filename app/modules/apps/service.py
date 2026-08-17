@@ -197,15 +197,21 @@ class AppsService:
         return app
 
     @staticmethod
-    def soft_delete(app_id: int) -> Application:
-        """Elimina ABSOLUTAMENTE TODO lo asociado a la app.
+    def delete(app_id: int) -> Application:
+        """Hard-delete real del registro en BD y limpieza absoluta.
 
-        Antes del borrado, guarda un snapshot completo de la config en
-        `AppDeletionLog` para trazabilidad. Despues elimina:
+        Antes del borrado guarda un snapshot completo en `AppDeletionLog`
+        para trazabilidad (la tabla `app_deletion_logs` mantiene los datos
+        aunque la app se elimine del registro principal).
+
+        Luego elimina:
         - K8s: namespace `user-apps-<slug>` (cascade: secrets, configmaps,
           deployments, services, ingresses, hpa, jobs, etc.).
-        - DB: marca la app como soft-deleted, marca scoops y dominios como
-          archived/deleted, y borra los eventos del timeline.
+        - DB: HARD DELETE de la app. Las FKs en cascada se encargan del
+          resto: scoops.application_id SET NULL (los scoops sobreviven sin
+          app), domains.application_id CASCADE (se borran), app_events
+          CASCADE (se borran). Queda solo `app_deletion_logs` con el
+          snapshot.
         - GitHub: borra el repo `laurel_<slug>` en la org.
         - GHCR: borra el paquete `laurel_<slug>` en GHCR.
 
@@ -214,16 +220,15 @@ class AppsService:
         """
         from app.modules.apps.model import AppDeletionLog
         from app.modules.cluster.service import K8sService
-        from app.modules.domains.model import Domain
         from app.modules.integrations.docker.service import ContainerRegistryService
         from app.modules.integrations.github.service import GitHubService
-        from app.modules.scoops.model import Scoop, STATUS_ARCHIVED
 
         app = AppsService.get(app_id)
         slug = app.slug
         ns = f"user-apps-{slug}"
 
-        # 0) Snapshot completo de la config para trazabilidad.
+        # 0) Snapshot completo de la config para trazabilidad (en
+        #    `app_deletion_logs` que NO tiene FK a `applications`).
         snapshot = AppsService._snapshot_for_deletion(app_id, ns)
         try:
             from flask import g
@@ -240,47 +245,38 @@ class AppsService:
             deleted_by=deleted_by,
         )
         db.session.add(log_row)
-        db.session.flush()  # para que la FK exista antes de tocar la app
+        db.session.flush()  # que el INSERT quede antes del DELETE de la app
 
         # 1) K8s: borrar el namespace (cascade todos los recursos dentro).
         try:
             if K8sService.namespace_exists(ns):
                 K8sService.delete_namespace(ns)
-                logger.info("app_force_delete: namespace %s borrado", ns)
+                logger.info("app_hard_delete: namespace %s borrado", ns)
         except Exception as exc:
-            logger.warning("app_force_delete: fallo borrando namespace %s: %s", ns, exc)
+            logger.warning("app_hard_delete: fallo borrando namespace %s: %s", ns, exc)
 
         # 2) GitHub: borrar el repo (si se creo).
         try:
             if GitHubService.repo_exists(slug):
                 GitHubService.delete_repo(slug)
-                logger.info("app_force_delete: repo GitHub borrado para %s", slug)
+                logger.info("app_hard_delete: repo GitHub borrado para %s", slug)
         except Exception as exc:
-            logger.warning("app_force_delete: fallo borrando repo GitHub para %s: %s", slug, exc)
+            logger.warning("app_hard_delete: fallo borrando repo GitHub para %s: %s", slug, exc)
 
         # 3) GHCR: borrar el paquete (si existe).
         try:
             ContainerRegistryService.delete_package(slug)
         except Exception as exc:
-            logger.warning("app_force_delete: fallo borrando paquete GHCR para %s: %s", slug, exc)
+            logger.warning("app_hard_delete: fallo borrando paquete GHCR para %s: %s", slug, exc)
 
-        # 4) DB: marcar scoops como archived y dominios como deleted,
-        #    luego soft-delete la app y limpiar eventos del timeline.
-        Scoop.query.filter(Scoop.application_id == app.id).update(
-            {Scoop.status: STATUS_ARCHIVED}, synchronize_session=False
-        )
-        Domain.query.filter(
-            Domain.application_id == app.id, Domain.deleted_at.is_(None)
-        ).update({Domain.deleted_at: utcnow()}, synchronize_session=False)
-        # Borrar eventos del timeline (FK cascade al hacer delete de la app).
-        from app.modules.apps.model import AppEvent
-        AppEvent.query.filter(AppEvent.application_id == app.id).delete(
-            synchronize_session=False
-        )
-        app.deleted_at = utcnow()
+        # 4) DB: HARD DELETE. Las FKs declaradas en los modelos (scoops SET NULL,
+        #    domains CASCADE, app_events CASCADE) hacen el resto. En SQLite
+        #    se necesita PRAGMA foreign_keys=ON (activado en tests/conftest).
+        deleted_id = app.id
+        db.session.delete(app)
         db.session.commit()
         AuditService.log(
-            "app_force_delete", "application", app.id,
+            "app_hard_delete", "application", deleted_id,
             {"slug": slug, "namespace": ns, "deletion_log_id": log_row.id},
         )
         return app

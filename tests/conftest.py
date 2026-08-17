@@ -26,6 +26,18 @@ class TestConfig(Config):
 def app():
     app = create_app(TestConfig)
     with app.app_context():
+        # SQLite no enforce FK CASCADE por defecto. Lo activamos via un
+        # listener de SQLAlchemy "connect" para que borrar una Application
+        # cascadee a scoops/domains/app_events como en MariaDB.
+        from sqlalchemy import event
+        @event.listens_for(db.engine, "connect")
+        def _fk_on(dbapi_conn, _):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.close()
+        # Forzar al menos una conexion para que el listener se dispare.
+        with db.engine.connect() as _conn:
+            pass
         db.create_all()
         yield app
         db.session.remove()
