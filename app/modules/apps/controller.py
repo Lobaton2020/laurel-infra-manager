@@ -41,11 +41,13 @@ def list_apps():
     parameters:
       - {name: page, in: query, type: integer}
       - {name: limit, in: query, type: integer}
+      - {name: workspace_id, in: query, type: integer, description: 'Filtra por workspace (solo sus apps)'}
     responses:
       200: {description: Listado paginado de Applications}
     """
     page, limit = pagination()
-    result = AppsService.list(page=page, limit=limit)
+    workspace_id = request.args.get("workspace_id", type=int)
+    result = AppsService.list(page=page, limit=limit, workspace_id=workspace_id)
     items = []
     for a in result["items"]:
         sc, dc = _counts_for(a)

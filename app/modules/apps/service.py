@@ -29,9 +29,14 @@ class AppsService:
         return s
 
     @staticmethod
-    def list(page: int = 1, limit: int = 20) -> dict:
-        """Lista apps no soft-deleted con paginacion."""
+    def list(page: int = 1, limit: int = 20, workspace_id: int | None = None) -> dict:
+        """Lista apps no soft-deleted con paginacion.
+
+        Si `workspace_id` viene, solo apps de ese workspace (las apps sin
+        workspace solo aparecen cuando no se filtra)."""
         query = Application.query.filter(Application.deleted_at.is_(None))
+        if workspace_id is not None:
+            query = query.filter(Application.workspace_id == workspace_id)
         total = query.count()
         items = (
             query.order_by(Application.created_at.desc())
