@@ -26,15 +26,11 @@ spec:
           env:
             - name: JAVA_OPTS
               value: "-Djenkins.install.runSetupWizard=false"
-            - name: JENKINS_OPTS
-              value: "-Dhudson.security.csrf.CrumbFilter.DISABLE_CSRF_PROTECTION=true"
-          # homelob corre containerd (k3s), no hay /var/run/docker.sock en el
-          # nodo, asi que el socket no se monta. Para `docker build/push` en
-          # los jobs: instalar docker en el nodo (opcion A, docs/jenkins.md) y
-          # volver a anadir este volumen, o usar DinD (opcion B).
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
+            - name: init-scripts
+              mountPath: /var/jenkins_home/init.groovy.d
           readinessProbe:
             httpGet:
               path: /login
@@ -52,15 +48,17 @@ spec:
         - name: jenkins-home
           persistentVolumeClaim:
             claimName: jenkins-home
+        - name: init-scripts
+          configMap:
+            name: jenkins-init-scripts
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: ConfigMap
 metadata:
-  name: jenkins-home
-spec:
-  storageClassName: local-path
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
+  name: jenkins-init-scripts
+data:
+  disable-csrf.groovy: |
+    import jenkins.model.Jenkins
+    Jenkins.instance.setCrumbIssuer(null)
+    Jenkins.instance.save()
+    println "=== CSRF DESHABILITADO ==="
