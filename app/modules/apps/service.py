@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import db
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.errors import AppError, ClusterError, ConflictError, NotFoundError
 from app.core.utils import utcnow
 from app.modules.apps.model import AppEvent, Application
 from app.modules.audits.service import AuditService
@@ -57,22 +57,27 @@ class AppsService:
 
     @staticmethod
     def create(data: dict) -> Application:
-        """Crea una Application nueva.
+        """Crea una Application nueva con rollback semantico.
 
-        Provision (obligatoria): al crear una app se crean 2 repos en
-        paralelo/huesped — repo GitHub (`laurel_<slug>` en la org) y repo
-        Docker Hub (`laurel_<slug>` en el namespace). Cada paso se registra
-        como un AppEvent (timeline) y si alguno falla la app queda
-        `status=error` (esos checks son obligatorios).
+        Pasos (en orden):
+        1. Repo GitHub (`laurel_<slug>`) si se pidio `create_github_repo`.
+        2. Namespace K8s `user-apps-<slug>` (idempotente).
+        3. INSERT en BD + eventos de timeline.
 
-        - Si `create_github_repo=true` y no se pasa `github_repo_url`,
-          crea el repo en GitHub. Si el usuario paso una URL custom, ese
-          check se considera `ok` (repo ya provisto).
-        - Si no se pasa `docker_image_base`, crea el repo en Docker Hub.
-        - Cualquier error != 503/409 deja `status=error`. Los 503 (PAT no
-          configurado) y 409 (repo ya existe) dejan `status=error` tambien
-          porque ahora el check es obligatorio: si falla, la app se crea
-          igual pero marcada como erronea para que el usuario lo vea.
+        Si CUALQUIER llamada externa (GitHub create, K8s create) o el
+        INSERT en BD falla, se hace rollback de lo que se haya creado:
+        - DB: `db.session.rollback()`.
+        - GitHub: `delete_repo` si llegamos a crearlo.
+        - K8s: `delete_namespace` si llegamos a crearlo.
+
+        La excepcion original se propaga al controller; el rollback es
+        best-effort (un fallo de cleanup se loguea y se descarta: la
+        excepcion original es la que importa al usuario).
+
+        Nota: el caso "no se proporciono `github_repo_url` ni
+        `create_github_repo`" NO se considera falla de GitHub (no se hace
+        ninguna llamada): la app se crea igualmente con `status=error` y
+        el evento de timeline marca el motivo.
         """
         from app.modules.integrations.docker.service import ContainerRegistryService
         from app.modules.integrations.github.service import GitHubService
@@ -87,14 +92,19 @@ class AppsService:
             raise NotFoundError(f"Workspace {workspace_id} no encontrado")
 
         events: list[tuple[str, str, str]] = []
+        # Flags de rollback: solo limpiamos lo que marcamos como creado.
+        created_github_repo = False
+        created_k8s_namespace = False
+        ns = f"user-apps-{slug}"
 
-        # Check 1: repo GitHub (obligatorio si se pidio crearlo).
+        # Step 1: repo GitHub (si se pidio crearlo).
         if github_url:
             events.append(("github_repo", "ok", f"Repo GitHub ya provisto: {github_url}"))
         elif create_repo_flag:
             try:
                 result = GitHubService.create_empty_repo(slug)
                 github_url = result["html_url"]
+                created_github_repo = True
                 AuditService.log(
                     "github_repo_created", "application", None,
                     {"slug": slug, "url": github_url},
@@ -104,19 +114,22 @@ class AppsService:
                     f"Repo GitHub creado: {result['full_name']}",
                 ))
             except AppError as exc:
-                events.append(("github_repo", "error", exc.message))
+                # Falla real: nada que limpiar todavia (no llegamos a tocar
+                # el namespace ni la BD). Propagar con contexto.
                 logger.warning("github_repo_failed para %s: %s", slug, exc.message)
+                raise AppError(
+                    f"No se pudo crear el repo en GitHub: {exc.message}",
+                    status_code=exc.status_code,
+                    details={"step": "github_repo"},
+                ) from exc
         else:
             events.append((
                 "github_repo", "error",
                 "Falta GitHub: no se proporciono github_repo_url ni create_github_repo",
             ))
 
-        # Check 2: imagen de contenedor en GHCR.
-        # GHCR NO requiere pre-crear el repo: el paquete se materializa en el
-        # primer `docker push ghcr.io/<owner>/<repo>` desde Jenkins. Solo
-        # calculamos el image_base por defecto y registramos el evento como
-        # `ok` (la creacion real ocurre en el push).
+        # Step 2: imagen de contenedor en GHCR. No requiere crear el repo
+        # (se materializa en el primer push), solo calculamos el base.
         if docker_base is None:
             docker_base = ContainerRegistryService.suggested_base(slug)
             events.append((
@@ -126,18 +139,27 @@ class AppsService:
         else:
             events.append(("ghcr_repo", "ok", f"Imagen base ya provista: {docker_base}"))
 
-        # Check 3: namespace K8s `user-apps-<slug>` (idempotente).
-        # Lo creamos al crear la app para que ya este listo para secrets/configs/scoops.
-        k8s_namespace = f"user-apps-{slug}"
+        # Step 3: namespace K8s `user-apps-<slug>` (idempotente).
+        from app.modules.cluster.service import K8sService
         try:
-            from app.modules.cluster.service import K8sService
-            if not K8sService.namespace_exists(k8s_namespace):
-                K8sService.create_namespace(k8s_namespace)
-            events.append(("k8s_namespace", "ok", f"Namespace K8s listo: {k8s_namespace}"))
+            if not K8sService.namespace_exists(ns):
+                K8sService.create_namespace(ns)
+                created_k8s_namespace = True
+            events.append(("k8s_namespace", "ok", f"Namespace K8s listo: {ns}"))
         except Exception as exc:
-            events.append(("k8s_namespace", "error", f"No se pudo crear namespace: {exc}"))
             logger.warning("k8s_namespace_failed para %s: %s", slug, exc)
+            AppsService._rollback_external(
+                slug=slug, ns=ns,
+                created_github=created_github_repo,
+                created_namespace=False,
+            )
+            raise ClusterError(
+                f"No se pudo crear el namespace K8s '{ns}': {exc}",
+                status_code=502,
+                details={"step": "k8s_namespace"},
+            ) from exc
 
+        # Step 4: INSERT en BD.
         app = Application(
             name=name,
             slug=slug,
@@ -151,6 +173,11 @@ class AppsService:
             db.session.flush()
         except IntegrityError as exc:
             db.session.rollback()
+            AppsService._rollback_external(
+                slug=slug, ns=ns,
+                created_github=created_github_repo,
+                created_namespace=created_k8s_namespace,
+            )
             raise ConflictError(
                 f"Ya existe una Application con name='{name}' o slug='{slug}'"
             ) from exc
@@ -175,6 +202,36 @@ class AppsService:
              "status": app.status},
         )
         return app
+
+    @staticmethod
+    def _rollback_external(
+        slug: str, ns: str, *, created_github: bool, created_namespace: bool,
+    ) -> None:
+        """Best-effort cleanup de recursos externos cuando `create` falla.
+
+        Solo limpia lo que se marco como creado. Errores de cleanup se
+        loguean y descartan: la excepcion original (que disparo el
+        rollback) es la que importa al usuario y la que se propaga.
+        """
+        from app.modules.cluster.service import K8sService
+        from app.modules.integrations.github.service import GitHubService
+
+        if created_namespace:
+            try:
+                K8sService.delete_namespace(ns)
+                logger.info("create_rollback: namespace %s borrado", ns)
+            except Exception as exc:
+                logger.warning(
+                    "create_rollback: fallo borrando namespace %s: %s", ns, exc,
+                )
+        if created_github:
+            try:
+                GitHubService.delete_repo(slug)
+                logger.info("create_rollback: GitHub repo %s borrado", slug)
+            except Exception as exc:
+                logger.warning(
+                    "create_rollback: fallo borrando GitHub repo %s: %s", slug, exc,
+                )
 
     @staticmethod
     def update(app_id: int, data: dict) -> Application:
