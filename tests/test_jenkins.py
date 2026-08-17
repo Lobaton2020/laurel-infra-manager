@@ -40,8 +40,8 @@ class TestTriggerBuild:
         app.config["JENKINS_URL"] = "http://jenkins:8080"
         posted = {}
 
-        def _post(url, params=None, data=None, timeout=None):
-            posted.update(url=url, params=params, data=data, timeout=timeout)
+        def _post(url, params=None, data=None, timeout=None, **kwargs):
+            posted.update(url=url, params=params, data=data, timeout=timeout, headers=kwargs.get("headers"))
             resp = Mock(status_code=201)
             # Jenkins responde 201 con header `Location: /job/<job>/<n>/`.
             resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/42/"}

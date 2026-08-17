@@ -7,6 +7,8 @@ import requests
 
 from app.core.errors import AppError
 
+JENKINS_CRUMB_URL = "/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%20//crumb)"
+
 logger = logging.getLogger(__name__)
 
 PREFIX = "laurel_"
@@ -57,6 +59,21 @@ class JenkinsService:
         return current_app.config.get("JENKINS_URL", "http://jenkins:8080").rstrip("/")
 
     @staticmethod
+    def _get_crumb() -> str:
+        """Obtiene el crumb de CSRF de Jenkins para incluir en POSTs."""
+        base = JenkinsService._base_url()
+        url = f"{base}{JENKINS_CRUMB_URL}"
+        try:
+            resp = requests.get(url, timeout=JENKINS_TIMEOUT)
+            resp.raise_for_status()
+            # Formato: "Jenkins-Crumb: abc123"
+            crumb_field = resp.text.strip()
+            return crumb_field
+        except requests.RequestException as exc:
+            logger.warning("No se pudo obtener crumb de Jenkins: %s", exc)
+            return ""
+
+    @staticmethod
     def trigger_build(slug: str, tag: str) -> dict:
         """Dispara el build remoto de `laurel_<slug>` con `tag`.
 
@@ -72,9 +89,14 @@ class JenkinsService:
         """
         _validate_slug(slug)
         token = _get_build_token()
+        crumb = JenkinsService._get_crumb()
         job = f"{PREFIX}{slug}"
         base = JenkinsService._base_url()
         url = f"{base}/job/{job}/buildWithParameters"
+
+        headers = {}
+        if crumb:
+            headers["Jenkins-Crumb"] = crumb
 
         try:
             resp = requests.post(
@@ -86,6 +108,7 @@ class JenkinsService:
                     "REPO": f"laurel-applications/{job}",
                     "IMAGE": f"aflobaton/{job}:{tag}",
                 },
+                headers=headers,
                 timeout=JENKINS_TIMEOUT,
             )
         except requests.RequestException as exc:
