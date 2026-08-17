@@ -47,6 +47,11 @@ class Application(db.Model):
         "Workspace", backref=db.backref("applications", lazy="dynamic")
     )
 
+    # Estado de provision de la app: 'provisioning' mientras se crean los
+    # repos externos; 'ok' si todos los checks pasan; 'error' si algun check
+    # obligatorio (repo GitHub / repo Docker Hub) fallo.
+    status = db.Column(db.String(20), default="provisioning", nullable=False)
+
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     deleted_at = db.Column(db.DateTime)
@@ -61,6 +66,41 @@ class Application(db.Model):
         "Domain", backref="application", lazy="dynamic",
         passive_deletes=True,
     )
+    events = db.relationship(
+        "AppEvent", backref="application", lazy="selectin",
+        order_by="AppEvent.id.asc()", passive_deletes=True,
+    )
 
     def __repr__(self) -> str:
         return f"<Application {self.slug} (id={self.id})>"
+
+
+class AppEvent(db.Model):
+    """Check/evento de provision de una Application (timeline).
+
+    Cada evento es un paso del bootstrap: crear repo GitHub, crear repo
+    Docker Hub, etc. `status` es 'ok' o 'error'. Estos eventos permiten al
+    usuario ver el timeline del proceso y entender por que una app quedo
+    'ok' o 'error'.
+    """
+
+    __tablename__ = "app_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    application_id = db.Column(
+        db.Integer, db.ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    event = db.Column(db.String(50), nullable=False)
+    status = db.Column(db.String(20), nullable=False)
+    detail = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "event": self.event,
+            "status": self.status,
+            "detail": self.detail,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

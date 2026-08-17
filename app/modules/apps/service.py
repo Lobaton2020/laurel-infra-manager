@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.db import db
 from app.core.errors import AppError, ConflictError, NotFoundError
 from app.core.utils import utcnow
-from app.modules.apps.model import Application
+from app.modules.apps.model import AppEvent, Application
 from app.modules.audits.service import AuditService
 from app.modules.scoops.schema import slugify
 from app.modules.workspaces.model import Workspace
@@ -59,9 +59,20 @@ class AppsService:
     def create(data: dict) -> Application:
         """Crea una Application nueva.
 
-        Hooks externos (opcionales):
+        Provision (obligatoria): al crear una app se crean 2 repos en
+        paralelo/huesped — repo GitHub (`laurel_<slug>` en la org) y repo
+        Docker Hub (`laurel_<slug>` en el namespace). Cada paso se registra
+        como un AppEvent (timeline) y si alguno falla la app queda
+        `status=error` (esos checks son obligatorios).
+
         - Si `create_github_repo=true` y no se pasa `github_repo_url`,
-          intenta crear el repo en GitHub via `GitHubService`.
+          crea el repo en GitHub. Si el usuario paso una URL custom, ese
+          check se considera `ok` (repo ya provisto).
+        - Si no se pasa `docker_image_base`, crea el repo en Docker Hub.
+        - Cualquier error != 503/409 deja `status=error`. Los 503 (PAT no
+          configurado) y 409 (repo ya existe) dejan `status=error` tambien
+          porque ahora el check es obligatorio: si falla, la app se crea
+          igual pero marcada como erronea para que el usuario lo vea.
         """
         from app.modules.integrations.docker.service import DockerHubService
         from app.modules.integrations.github.service import GitHubService
@@ -75,8 +86,13 @@ class AppsService:
         if workspace_id is not None and not db.session.get(Workspace, workspace_id):
             raise NotFoundError(f"Workspace {workspace_id} no encontrado")
 
-        if create_repo_flag and not github_url:
-            # Solo intentamos crear si el caller no paso una URL custom.
+        events: list[tuple[str, str, str]] = []
+
+        # Check 1: repo GitHub (obligatorio si se pidio crearlo).
+        if github_url:
+            # Repo ya provisto manualmente: check ok.
+            events.append(("github_repo", "ok", f"Repo GitHub ya provisto: {github_url}"))
+        elif create_repo_flag:
             try:
                 result = GitHubService.create_empty_repo(slug)
                 github_url = result["html_url"]
@@ -84,19 +100,22 @@ class AppsService:
                     "github_repo_created", "application", None,
                     {"slug": slug, "url": github_url},
                 )
+                events.append((
+                    "github_repo", "ok",
+                    f"Repo GitHub creado: {result['full_name']}",
+                ))
             except AppError as exc:
-                if exc.status_code == 503:
-                    # PAT no configurado: skip silencioso, auditamos.
-                    logger.info("github_repo_skipped para %s: PAT no configurado", slug)
-                    AuditService.log(
-                        "app_create", "application", None,
-                        {"slug": slug, "github_repo_skipped": "pat_missing"},
-                    )
-                else:
-                    raise
+                events.append(("github_repo", "error", exc.message))
+                logger.warning("github_repo_failed para %s: %s", slug, exc.message)
+        else:
+            # No se pidio crear y no hay URL: provision incompleta (error).
+            events.append((
+                "github_repo", "error",
+                "Falta GitHub: no se proporciono github_repo_url ni create_github_repo",
+            ))
 
-        # Repo vacio en Docker Hub (el push de Jenkins lo necesita para existir).
-        # Se crea siempre salvo que ya se indico docker_image_base manualmente.
+        # Check 2: repo Docker Hub (obligatorio salvo que docker_image_base
+        # venga manual).
         if docker_base is None:
             try:
                 DockerHubService.create_empty_repo(slug)
@@ -104,16 +123,15 @@ class AppsService:
                     "dockerhub_repo_created", "application", None,
                     {"slug": slug},
                 )
+                events.append((
+                    "dockerhub_repo", "ok",
+                    f"Repo Docker Hub creado: {DockerHubService.suggested_base(slug)}",
+                ))
             except AppError as exc:
-                if exc.status_code in (503, 409):
-                    # 503: PAT no configurado (skip silencioso); 409: ya existe.
-                    logger.info("dockerhub_repo_skipped para %s: %s", slug, exc.message)
-                    AuditService.log(
-                        "app_create", "application", None,
-                        {"slug": slug, "dockerhub_repo_skipped": exc.message},
-                    )
-                else:
-                    raise
+                events.append(("dockerhub_repo", "error", exc.message))
+                logger.warning("dockerhub_repo_failed para %s: %s", slug, exc.message)
+        else:
+            events.append(("dockerhub_repo", "ok", f"Imagen base ya provista: {docker_base}"))
 
         app = Application(
             name=name,
@@ -125,16 +143,31 @@ class AppsService:
         )
         try:
             db.session.add(app)
-            db.session.commit()
+            db.session.flush()
         except IntegrityError as exc:
             db.session.rollback()
             raise ConflictError(
                 f"Ya existe una Application con name='{name}' o slug='{slug}'"
             ) from exc
 
+        # Persistir timeline de eventos y derivar el estado final.
+        for event, status, detail in events:
+            db.session.add(AppEvent(
+                application_id=app.id,
+                event=event,
+                status=status,
+                detail=detail,
+            ))
+            if status == "error":
+                app.status = "error"
+        if app.status != "error":
+            app.status = "ok" if events else "ok"
+        db.session.commit()
+
         AuditService.log(
             "app_create", "application", app.id,
-            {"slug": slug, "name": name, "github_repo_url": github_url},
+            {"slug": slug, "name": name, "github_repo_url": github_url,
+             "status": app.status},
         )
         return app
 

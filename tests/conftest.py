@@ -16,6 +16,10 @@ class TestConfig(Config):
     SERVICE_PORT_RANGE_START = 3000
     SERVICE_PORT_RANGE_END = 3005  # rango corto para poder probar el agotamiento
     HPA_TARGET_CPU = 80
+    # Sin PATs en tests: las integraciones (GitHub/Docker Hub) siempre fallan
+    # con 503 y el create de apps no hace llamadas HTTP reales.
+    GITHUB_PAT = ""
+    DOCKER_HUB_TOKEN = ""
 
 
 @pytest.fixture

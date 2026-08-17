@@ -1,0 +1,82 @@
+"""Tests del timeline de provision de apps (estado + eventos repos)."""
+from datetime import datetime, timedelta, timezone
+
+import jwt
+import pytest
+
+
+def _jwt(app, sub="user-1"):
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": sub,
+            "email": f"{sub}@example.com",
+            "name": sub,
+            "iat": now,
+            "exp": now + timedelta(hours=1),
+        },
+        app.config["SECRET_KEY"],
+        algorithm=app.config["JWT_ALGORITHM"],
+    )
+
+
+@pytest.fixture
+def auth(app):
+    def _make(sub="user-1"):
+        return {"Authorization": f"Bearer {_jwt(app, sub)}"}
+    return _make
+
+
+@pytest.fixture
+def ws(client, auth):
+    r = client.post("/api/workspaces", json={"name": "Mi Workspace"}, headers=auth())
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()
+
+
+class TestAppProvisionEvents:
+    def test_create_app_with_workspace_records_events_and_ok(self, client, auth, ws):
+        # Sin PATs (TestConfig los vacia): dockerhub falla 503 -> error,
+        # github no pedido -> error. La app se crea con status=error.
+        r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
+        assert r.status_code == 201, r.get_json()
+        app = r.get_json()
+        assert app["workspace_id"] == ws["id"]
+        assert app["status"] == "error"  # checks obligatorios fallidos
+        events = app["events"]
+        assert len(events) == 2
+        assert events[0]["event"] == "github_repo"
+        assert events[0]["status"] == "error"
+        assert events[1]["event"] == "dockerhub_repo"
+        assert events[1]["status"] == "error"
+
+    def test_create_app_with_manual_repos_is_ok(self, client, auth, ws):
+        # Con repos provistos manualmente, ambos checks son ok.
+        r = client.post("/api/apps", json={
+            "name": "Manual",
+            "workspace_id": ws["id"],
+            "github_repo_url": "https://github.com/laurel-applications/laurel_manual",
+            "docker_image_base": "aflobaton/laurel_manual",
+        }, headers=auth())
+        assert r.status_code == 201, r.get_json()
+        app = r.get_json()
+        assert app["status"] == "ok"
+        statuses = {e["event"]: e["status"] for e in app["events"]}
+        assert statuses == {"github_repo": "ok", "dockerhub_repo": "ok"}
+
+    def test_events_endpoint_returns_timeline(self, client, auth, ws):
+        r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
+        app_id = r.get_json()["id"]
+        r = client.get(f"/api/apps/{app_id}/events", headers=auth())
+        assert r.status_code == 200
+        items = r.get_json()["items"]
+        assert len(items) == 2
+
+    def test_list_apps_filters_by_workspace(self, client, auth, ws):
+        ws2 = client.post("/api/workspaces", json={"name": "Otro"}, headers=auth()).get_json()
+        client.post("/api/apps", json={"name": "AppA", "workspace_id": ws["id"]}, headers=auth())
+        client.post("/api/apps", json={"name": "AppB", "workspace_id": ws2["id"]}, headers=auth())
+        r = client.get(f"/api/apps?workspace_id={ws['id']}", headers=auth())
+        items = r.get_json()["items"]
+        assert len(items) == 1
+        assert items[0]["name"] == "AppA"

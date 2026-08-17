@@ -131,6 +131,7 @@ class ApplicationResponse(BaseModel):
     github_repo_url: Optional[str] = None
     docker_image_base: Optional[str] = None
     workspace_id: Optional[int] = None
+    status: str = "provisioning"
 
     scoops_count: int = 0
     domains_count: int = 0
@@ -138,6 +139,7 @@ class ApplicationResponse(BaseModel):
 
     created_at: str
     updated_at: str
+    events: list[dict] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -151,11 +153,13 @@ class ApplicationResponse(BaseModel):
             github_repo_url=app.github_repo_url,
             docker_image_base=app.docker_image_base,
             workspace_id=app.workspace_id,
+            status=app.status,
             scoops_count=scoops_count,
             domains_count=domains_count,
             namespace=app.slug,
             created_at=app.created_at.isoformat() if app.created_at else "",
             updated_at=app.updated_at.isoformat() if app.updated_at else "",
+            events=[e.to_dict() for e in app.events],
         )
 
 

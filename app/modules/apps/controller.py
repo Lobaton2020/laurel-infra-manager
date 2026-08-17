@@ -2,6 +2,7 @@
 from flask import Blueprint, jsonify, request
 
 from app.core.http import pagination
+from app.modules.apps.model import AppEvent
 from app.modules.apps.schema import (
     ApplicationCreate,
     ApplicationListResponse,
@@ -103,6 +104,21 @@ def get_app(app_id: int):
     app = AppsService.get(app_id)
     sc, dc = _counts_for(app)
     return jsonify(_serialize(app, sc, dc))
+
+
+@bp.get("/<int:app_id>/events")
+def get_app_events(app_id: int):
+    """Timeline de provision de una Application (repos GitHub/Docker Hub)
+    ---
+    tags: [Apps]
+    parameters:
+      - {name: app_id, in: path, required: true, type: integer}
+    responses:
+      200: {description: Lista de eventos de provision}
+      404: {description: No existe}
+    """
+    app = AppsService.get(app_id)
+    return jsonify({"items": [e.to_dict() for e in app.events]})
 
 
 @bp.put("/<int:app_id>")
