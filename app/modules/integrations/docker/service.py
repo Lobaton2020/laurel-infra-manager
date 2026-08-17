@@ -29,6 +29,21 @@ _BASE_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 # Imagen completa con tag: <algo>/<algo>:<tag>
 _FULL_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+:[a-zA-Z0-9._-]+$")
 
+# DNS-1123 (igual patron que el resto del proyecto)
+_DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
+def _validate_slug(slug: str) -> None:
+    if not slug or not _DNS_LABEL.match(slug):
+        raise AppError(
+            f"slug '{slug}' no es DNS-1123 valido",
+            status_code=400,
+        )
+
+
+def _repo_name(slug: str) -> str:
+    return f"{PREFIX}{slug}"
+
 
 def _get_namespace() -> str:
     from flask import current_app
@@ -66,6 +81,61 @@ class DockerHubService:
     def suggested_base(slug: str) -> str:
         """Genera el image_base sugerido: `<namespace>/laurel_<slug>`."""
         return f"{_get_namespace()}/{PREFIX}{slug}"
+
+    @staticmethod
+    def create_empty_repo(slug: str, description: str | None = None, private: bool = False) -> dict:
+        """Crea un repo vacio `laurel_<slug>` en Docker Hub.
+
+        Docker Hub NO crea repos automaticamente en el primer push como hace
+        GitHub: el repo debe existir para que `docker push` funcione. Por eso
+        lo creamos aqui al crear la Application, igual que GitHubService.
+
+        Returns: `{"namespace", "name", "full_name", "is_private"}`.
+        Raises:
+            AppError 400 si el slug es invalido o el nombre resultante es largo.
+            AppError 503 si el PAT no esta configurado.
+            AppError 502 si Docker Hub responde 401/403 (PAT invalido) u otro error.
+            AppError 409 si el repo ya existe (Docker Hub 409).
+        """
+        _validate_slug(slug)
+        namespace = _get_namespace()
+        name = _repo_name(slug)
+        pat = _get_pat()
+        if pat is None:
+            raise AppError(
+                "Docker Hub PAT no configurado. "
+                "Configurelo en PUT /api/system/secrets/docker_pat",
+                status_code=503,
+            )
+
+        resp = requests.post(
+            f"https://hub.docker.com/v2/repositories/{namespace}/",
+            headers={"Authorization": f"Bearer {pat}"},
+            json={
+                "name": name,
+                "description": description or f"Laurel platform app: {slug}",
+                "is_private": private,
+            },
+            timeout=10,
+        )
+
+        if resp.status_code == 201:
+            data = resp.json()
+            return {
+                "namespace": data.get("namespace"),
+                "name": data.get("name"),
+                "full_name": data.get("full_name"),
+                "is_private": data.get("is_private"),
+            }
+        if resp.status_code == 409:
+            raise AppError(
+                f"Docker Hub repo '{namespace}/{name}' already exists",
+                status_code=409,
+            )
+        raise AppError(
+            f"Docker Hub API error {resp.status_code}: {resp.text[:200]}",
+            status_code=502,
+        )
 
     @staticmethod
     def image_exists(image_ref: str) -> bool | None:

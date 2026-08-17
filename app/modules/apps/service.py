@@ -57,11 +57,13 @@ class AppsService:
         - Si `create_github_repo=true` y no se pasa `github_repo_url`,
           intenta crear el repo en GitHub via `GitHubService`.
         """
+        from app.modules.integrations.docker.service import DockerHubService
         from app.modules.integrations.github.service import GitHubService
 
         name = data["name"]
         slug = AppsService._to_slug(name)
         github_url = data.get("github_repo_url")
+        docker_base = data.get("docker_image_base")
         create_repo_flag = data.get("create_github_repo", False)
 
         if create_repo_flag and not github_url:
@@ -84,12 +86,32 @@ class AppsService:
                 else:
                     raise
 
+        # Repo vacio en Docker Hub (el push de Jenkins lo necesita para existir).
+        # Se crea siempre salvo que ya se indico docker_image_base manualmente.
+        if docker_base is None:
+            try:
+                DockerHubService.create_empty_repo(slug)
+                AuditService.log(
+                    "dockerhub_repo_created", "application", None,
+                    {"slug": slug},
+                )
+            except AppError as exc:
+                if exc.status_code in (503, 409):
+                    # 503: PAT no configurado (skip silencioso); 409: ya existe.
+                    logger.info("dockerhub_repo_skipped para %s: %s", slug, exc.message)
+                    AuditService.log(
+                        "app_create", "application", None,
+                        {"slug": slug, "dockerhub_repo_skipped": exc.message},
+                    )
+                else:
+                    raise
+
         app = Application(
             name=name,
             slug=slug,
             description=data.get("description"),
             github_repo_url=github_url,
-            docker_image_base=data.get("docker_image_base"),
+            docker_image_base=docker_base,
         )
         try:
             db.session.add(app)
