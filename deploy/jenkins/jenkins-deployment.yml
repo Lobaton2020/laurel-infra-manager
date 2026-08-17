@@ -26,9 +26,8 @@ spec:
           env:
             - name: JAVA_OPTS
               value: "-Djenkins.install.runSetupWizard=false"
-            # Opcional: pinta config adicional de Jenkins al arrancar.
             - name: JENKINS_OPTS
-              value: ""
+              value: "-Dhudson.security.csrf.csrumbypass=true"
           # homelob corre containerd (k3s), no hay /var/run/docker.sock en el
           # nodo, asi que el socket no se monta. Para `docker build/push` en
           # los jobs: instalar docker en el nodo (opcion A, docs/jenkins.md) y
