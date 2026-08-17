@@ -6,6 +6,8 @@ metadata:
     app: jenkins
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: jenkins
@@ -14,6 +16,23 @@ spec:
       labels:
         app: jenkins
     spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-jenkins
+          image: jenkins/jenkins:lts-jdk17
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Inicializando Jenkins home..."
+              mkdir -p /var/jenkins_home/.jenkins
+              chown -R 1000:1000 /var/jenkins_home
+              chmod -R 755 /var/jenkins_home
+              echo "✅ Permisos configurados"
+          volumeMounts:
+            - name: jenkins-home
+              mountPath: /var/jenkins_home
       containers:
         - name: jenkins
           image: jenkins/jenkins:lts-jdk17
@@ -25,27 +44,26 @@ spec:
               name: agent
           env:
             - name: JAVA_OPTS
-              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.CrumbFilter.DISABLE_CSRF_PROTECTION=true"
+              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.CrumbFilter.DISABLE_CSRF_PROTECTION=true -Djava.awt.headless=true"
+            - name: JENKINS_HOME
+              value: /var/jenkins_home
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
-            - name: init-scripts
-              mountPath: /var/jenkins_home/init.groovy.d
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - |
-                    chown -R 1000:1000 /var/jenkins_home 2>/dev/null || true
-                    chmod -R 755 /var/jenkins_home 2>/dev/null || true
           readinessProbe:
             httpGet:
               path: /login
               port: 8080
-            initialDelaySeconds: 90
+            initialDelaySeconds: 60
             periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
           resources:
             requests:
               cpu: "500m"
@@ -57,10 +75,6 @@ spec:
         - name: jenkins-home
           persistentVolumeClaim:
             claimName: jenkins-home
-        - name: init-scripts
-          configMap:
-            name: jenkins-init-scripts
-            defaultMode: 0755
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -73,14 +87,3 @@ spec:
   resources:
     requests:
       storage: 10Gi
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: jenkins-init-scripts
-data:
-  disable-csrf.groovy: |
-    import jenkins.model.Jenkins
-    Jenkins.instance.setCrumbIssuer(null)
-    Jenkins.instance.save()
-    println "=== CSRF DESHABILITADO ==="
