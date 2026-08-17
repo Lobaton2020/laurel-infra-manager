@@ -27,7 +27,7 @@ spec:
             - name: JAVA_OPTS
               value: "-Djenkins.install.runSetupWizard=false"
             - name: JENKINS_OPTS
-              value: "-Dhudson.security.csrf.csrumbypass=true"
+              value: "-Dhudson.security.csrf.CrumbFilter.DISABLE_CSRF_PROTECTION=true"
           # homelob corre containerd (k3s), no hay /var/run/docker.sock en el
           # nodo, asi que el socket no se monta. Para `docker build/push` en
           # los jobs: instalar docker en el nodo (opcion A, docs/jenkins.md) y
