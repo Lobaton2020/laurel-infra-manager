@@ -1,8 +1,15 @@
-"""Cliente PAT-based para Docker Hub.
+"""Cliente Docker Hub via JWT bearer.
 
 Validacion y verificacion de existencia de imagenes. NO incluye push,
 build, tag ni delete (YAGNI: lo que necesita la plataforma es validar
 referencias al crear apps y verificar si una imagen existe).
+
+Auth: Docker Hub NO acepta un PAT directamente como `Authorization: Bearer
+<PAT>`. Hay que pasar el PAT por Basic auth contra `/v2/auth/token` para
+recibir un JWT bearer de ~30s, y usar ese JWT en las llamadas siguientes.
+El helper `_hub_bearer()` cachea el JWT en memoria hasta 30s antes de
+volver a pedirlo. Si `/v2/auth/token` no esta disponible (algunas cuentas
+personales antiguas), se hace fallback al PAT crudo.
 
 Convencion por defecto:
 - Namespace: configurable via `DOCKER_HUB_NAMESPACE` (default `aflobaton`).
@@ -14,6 +21,7 @@ para excepciones al prefijo.
 """
 import logging
 import re
+import time
 
 import requests
 
@@ -31,6 +39,12 @@ _FULL_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+:[a-zA-Z0-9._-]+$")
 
 # DNS-1123 (igual patron que el resto del proyecto)
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+# Cache modulo-nivel del JWT bearer de Docker Hub. Se invalida a los 30s
+# (los tokens de Docker Hub expiran en ~60s; cortamos antes para evitar
+# race conditions). Tests lo resetean.
+_BEARER: dict | None = None
+_BEARER_TTL_S = 30
 
 
 def _validate_slug(slug: str) -> None:
@@ -64,6 +78,60 @@ def _get_pat() -> str | None:
         return None
     pat = (content or "").strip()
     return pat or None
+
+
+def _hub_bearer(force_refresh: bool = False) -> str | None:
+    """Devuelve un JWT bearer de Docker Hub valido para `Authorization`.
+
+    Flujo:
+      1. Si no hay namespace o PAT -> None.
+      2. Si hay un JWT cacheado y aun no expira -> devolverlo.
+      3. `GET https://hub.docker.com/v2/auth/token` con Basic auth
+         (username=namespace, password=PAT). Docker Hub intercambia el PAT
+         por un JWT de ~60s.
+      4. Cachear `(token, expires_at)` modulo-nivel con TTL conservador
+         (30s) para evitar expiracion en vuelo.
+      5. Si la llamada a `/v2/auth/token` falla -> log warning + fallback
+         al PAT crudo (compatibilidad con cuentas que aun aceptan bearer
+         directo, ya no es la norma).
+
+    Devuelve None solo si no hay credenciales configuradas.
+    """
+    global _BEARER
+    namespace = _get_namespace()
+    pat = _get_pat()
+    if not namespace or not pat:
+        return None
+
+    now = time.time()
+    if not force_refresh and _BEARER and _BEARER["expires"] > now:
+        return _BEARER["token"]
+
+    try:
+        resp = requests.get(
+            "https://hub.docker.com/v2/auth/token",
+            auth=(namespace, pat),
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("token") or data.get("access_token")
+        if not token:
+            raise ValueError("auth/token response sin 'token'")
+        _BEARER = {"token": token, "expires": now + _BEARER_TTL_S}
+        return token
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning(
+            "DockerHub /v2/auth/token fallo (%s); fallback a PAT crudo",
+            exc,
+        )
+        return pat
+
+
+def reset_bearer_cache() -> None:
+    """Limpia el cache del JWT. Tests de aislamiento."""
+    global _BEARER
+    _BEARER = None
 
 
 class DockerHubService:
@@ -105,8 +173,8 @@ class DockerHubService:
         _validate_slug(slug)
         namespace = _get_namespace()
         name = _repo_name(slug)
-        pat = _get_pat()
-        if pat is None:
+        bearer = _hub_bearer()
+        if bearer is None:
             raise AppError(
                 "Docker Hub PAT no configurado. "
                 "Configurelo en PUT /api/system/secrets/docker_pat",
@@ -115,7 +183,7 @@ class DockerHubService:
 
         resp = requests.post(
             f"https://hub.docker.com/v2/repositories/{namespace}/",
-            headers={"Authorization": f"Bearer {pat}"},
+            headers={"Authorization": f"Bearer {bearer}"},
             json={
                 "name": name,
                 "description": description or f"Laurel platform app: {slug}",
@@ -151,8 +219,8 @@ class DockerHubService:
         """
         if not DockerHubService.validate_image_ref(image_ref):
             return None
-        pat = _get_pat()
-        if pat is None:
+        bearer = _hub_bearer()
+        if bearer is None:
             return None
 
         namespace, _, rest = image_ref.partition("/")
@@ -164,7 +232,7 @@ class DockerHubService:
         )
         try:
             resp = requests.get(
-                url, headers={"Authorization": f"Bearer {pat}"}, timeout=5,
+                url, headers={"Authorization": f"Bearer {bearer}"}, timeout=5,
             )
         except requests.RequestException as exc:
             logger.warning("DockerHub image_exists fallo de red: %s", exc)
