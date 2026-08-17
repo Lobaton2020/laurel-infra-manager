@@ -44,6 +44,12 @@ def github_webhook():
 
     payload = request.get_json(silent=True)
     if payload is None:
+        # GitHub puede enviar el payload como form-urlencoded (campo `payload`).
+        import json as _json
+        form = request.form.get("payload")
+        if form:
+            payload = _json.loads(form)
+    if payload is None:
         return _signature_error("invalid payload", 400)
 
     signature = request.headers.get("X-Hub-Signature-256", "")
