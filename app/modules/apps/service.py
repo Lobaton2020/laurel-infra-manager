@@ -74,7 +74,7 @@ class AppsService:
           porque ahora el check es obligatorio: si falla, la app se crea
           igual pero marcada como erronea para que el usuario lo vea.
         """
-        from app.modules.integrations.docker.service import DockerHubService
+        from app.modules.integrations.docker.service import ContainerRegistryService
         from app.modules.integrations.github.service import GitHubService
 
         name = data["name"]
@@ -90,7 +90,6 @@ class AppsService:
 
         # Check 1: repo GitHub (obligatorio si se pidio crearlo).
         if github_url:
-            # Repo ya provisto manualmente: check ok.
             events.append(("github_repo", "ok", f"Repo GitHub ya provisto: {github_url}"))
         elif create_repo_flag:
             try:
@@ -108,30 +107,24 @@ class AppsService:
                 events.append(("github_repo", "error", exc.message))
                 logger.warning("github_repo_failed para %s: %s", slug, exc.message)
         else:
-            # No se pidio crear y no hay URL: provision incompleta (error).
             events.append((
                 "github_repo", "error",
                 "Falta GitHub: no se proporciono github_repo_url ni create_github_repo",
             ))
 
-        # Check 2: repo Docker Hub (obligatorio salvo que docker_image_base
-        # venga manual).
+        # Check 2: imagen de contenedor en GHCR.
+        # GHCR NO requiere pre-crear el repo: el paquete se materializa en el
+        # primer `docker push ghcr.io/<owner>/<repo>` desde Jenkins. Solo
+        # calculamos el image_base por defecto y registramos el evento como
+        # `ok` (la creacion real ocurre en el push).
         if docker_base is None:
-            try:
-                DockerHubService.create_empty_repo(slug)
-                AuditService.log(
-                    "dockerhub_repo_created", "application", None,
-                    {"slug": slug},
-                )
-                events.append((
-                    "dockerhub_repo", "ok",
-                    f"Repo Docker Hub creado: {DockerHubService.suggested_base(slug)}",
-                ))
-            except AppError as exc:
-                events.append(("dockerhub_repo", "error", exc.message))
-                logger.warning("dockerhub_repo_failed para %s: %s", slug, exc.message)
+            docker_base = ContainerRegistryService.suggested_base(slug)
+            events.append((
+                "ghcr_repo", "ok",
+                f"Imagen GHCR: {docker_base} (se crea en el primer push)",
+            ))
         else:
-            events.append(("dockerhub_repo", "ok", f"Imagen base ya provista: {docker_base}"))
+            events.append(("ghcr_repo", "ok", f"Imagen base ya provista: {docker_base}"))
 
         app = Application(
             name=name,

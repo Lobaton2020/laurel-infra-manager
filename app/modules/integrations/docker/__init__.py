@@ -1,4 +1,4 @@
 """Sub-modulo de integracion con Docker Hub."""
-from app.modules.integrations.docker.service import DockerHubService
+from app.modules.integrations.docker.service import ContainerRegistryService
 
-__all__ = ["DockerHubService"]
+__all__ = ["ContainerRegistryService"]

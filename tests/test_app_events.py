@@ -36,19 +36,19 @@ def ws(client, auth):
 
 class TestAppProvisionEvents:
     def test_create_app_with_workspace_records_events_and_ok(self, client, auth, ws):
-        # Sin PATs (TestConfig los vacia): dockerhub falla 503 -> error,
-        # github no pedido -> error. La app se crea con status=error.
+        # Sin PATs (TestConfig los vacia): github no pedido -> error, GHCR ok
+        # por defecto. Resultado: la app queda con status=error.
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()
         assert app["workspace_id"] == ws["id"]
-        assert app["status"] == "error"  # checks obligatorios fallidos
+        assert app["status"] == "error"
         events = app["events"]
         assert len(events) == 2
         assert events[0]["event"] == "github_repo"
         assert events[0]["status"] == "error"
-        assert events[1]["event"] == "dockerhub_repo"
-        assert events[1]["status"] == "error"
+        assert events[1]["event"] == "ghcr_repo"
+        assert events[1]["status"] == "ok"
 
     def test_create_app_with_manual_repos_is_ok(self, client, auth, ws):
         # Con repos provistos manualmente, ambos checks son ok.
@@ -56,13 +56,13 @@ class TestAppProvisionEvents:
             "name": "Manual",
             "workspace_id": ws["id"],
             "github_repo_url": "https://github.com/laurel-applications/laurel_manual",
-            "docker_image_base": "aflobaton/laurel_manual",
+            "docker_image_base": "ghcr.io/laurel-applications/laurel_manual",
         }, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()
         assert app["status"] == "ok"
         statuses = {e["event"]: e["status"] for e in app["events"]}
-        assert statuses == {"github_repo": "ok", "dockerhub_repo": "ok"}
+        assert statuses == {"github_repo": "ok", "ghcr_repo": "ok"}
 
     def test_events_endpoint_returns_timeline(self, client, auth, ws):
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())

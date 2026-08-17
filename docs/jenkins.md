@@ -37,17 +37,17 @@ Para fijar uno propio, añade al Deployment el env `JENKINS_ADMIN_PASSWORD=<pass
 1. **Nuevo item** → tipo **Pipeline** → nombre `laurel_<slug>`.
 2. **General**: marca *Discard old builds* y añade parámetros:
    - `SLUG` (default `<slug>`)
-   - `TAG` (default `latest`)
-   - `REPO` (default `laurel-applications/laurel_<slug>`)
-   - `IMAGE` (default `aflobaton/laurel_<slug>:${TAG}`)
-   - `JENKINS_TOKEN` (string, default el token guardado en `/api/system/secrets/jenkins_token`).
-3. **Build Triggers**: activa *Trigger builds remotely (e.g., from scripts)* con token `JENKINS_TOKEN`. La URL de disparo:
+- `TAG` (default `latest`)
+    - `REPO` (default `laurel-applications/laurel_<slug>`)
+    - `IMAGE` (default `ghcr.io/laurel-applications/laurel_<slug>:${TAG}`)
+    - `JENKINS_TOKEN` (string, default el token guardado en `/api/system/secrets/jenkins_token`).
+ 3. **Build Triggers**: activa *Trigger builds remotely (e.g., from scripts)* con token `JENKINS_TOKEN`. La URL de disparo:
 
-   ```
-   http://jenkins.andreslobaton.top/job/laurel_<slug>/buildWithParameters?token=${JENKINS_TOKEN}&SLUG=<slug>&TAG=1.0.0
-   ```
+    ```
+    http://jenkins.andreslobaton.top/job/laurel_<slug>/buildWithParameters?token=${JENKINS_TOKEN}&SLUG=<slug>&TAG=1.0.0
+    ```
 
-4. **Pipeline** → *Pipeline script*:
+ 4. **Pipeline** → *Pipeline script*:
 
 ```groovy
 pipeline {
@@ -57,11 +57,10 @@ pipeline {
     string(name: 'TAG', defaultValue: 'latest')
     string(name: 'REPO', defaultValue: 'laurel-applications/laurel_<slug>')
     string(name: 'IMAGE', defaultValue: '')
+    string(name: 'GHCR_OWNER', defaultValue: 'laurel-applications')
   }
   environment {
-    // El controller monta el socket docker del host; docker build/push corre
-    // contra el daemon del nodo y usa la sesion de login del host.
-    IMG = params.IMAGE ?: "aflobaton/laurel_${params.SLUG}:${params.TAG}"
+    IMG = params.IMAGE ?: "ghcr.io/${params.GHCR_OWNER}/laurel_${params.SLUG}:${params.TAG}"
   }
   stages {
     stage('checkout') {
@@ -83,11 +82,26 @@ pipeline {
         }
       }
     }
+    stage('login ghcr') {
+      steps {
+        // Login con el PAT de GitHub (scope write:packages + read:packages).
+        // El PAT se guarda como credencial de Jenkins (Secret text), no en el
+        // script. Crea una credencial 'github-pat' en Jenkins y referenciala.
+        withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_PAT')]) {
+          sh 'echo "$GITHUB_PAT" | docker login ghcr.io -u $GITHUB_USER --password-stdin'
+        }
+      }
+    }
     stage('build & push') {
       steps {
         sh "docker build -t ${IMG} ."
         sh "docker push ${IMG}"
       }
+    }
+  }
+  post {
+    always {
+      sh 'docker logout ghcr.io || true'
     }
   }
 }
