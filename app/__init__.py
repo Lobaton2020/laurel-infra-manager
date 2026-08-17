@@ -48,7 +48,6 @@ def create_app(config_class=Config) -> Flask:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    CORS(app)
     db.init_app(app)
 
     # Importar los modelos antes de create_all para que se registren en el metadata.
