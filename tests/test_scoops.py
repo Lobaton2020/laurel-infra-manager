@@ -405,3 +405,31 @@ class TestScoopUrlRegistryDerivation:
                  "url_registry": None}
         r2 = client.post("/api/scoops", json=body2)
         assert r2.status_code in (400, 422)
+
+    def test_url_registry_uses_app_image_even_when_caller_passes_other(
+        self, client, scoop_payload, caplog,
+    ):
+        """Si el caller pasa url_registry pero la app tiene docker_image_base,
+        el de la app gana (warning si difieren)."""
+        import logging
+        app = self._create_app_with_image(client, "owner", "ghcr.io/me/winner")
+        body = {
+            **scoop_payload,
+            "application_id": app["id"],
+            "name": "loser",
+            "url_registry": "ghcr.io/me/loser:v1",  # sera ignorado
+        }
+        with caplog.at_level(logging.WARNING, logger="app.modules.scoops.service"):
+            r = client.post("/api/scoops", json=body)
+        assert r.status_code == 201
+        assert r.get_json()["url_registry"] == "ghcr.io/me/winner:1.4.2"
+        assert any("url_registry" in m and "winner" in m for m in caplog.messages)
+
+    def test_caller_url_registry_accepted_when_no_app(self, client, scoop_payload):
+        """Sin application_id y con url_registry explicito, el del caller gana
+        (caso legacy: scoop libre sin app)."""
+        body = {**scoop_payload, "application_id": None,
+                "url_registry": "ghcr.io/legacy/img:v9"}
+        r = client.post("/api/scoops", json=body)
+        assert r.status_code == 201
+        assert r.get_json()["url_registry"] == "ghcr.io/legacy/img:v9"

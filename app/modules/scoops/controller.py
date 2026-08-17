@@ -64,23 +64,26 @@ def list_scoops():
 def available_env_from():
     """Lista ConfigMaps y Secrets pre-existentes en un namespace para que el
     usuario pueda seleccionarlos como refs `envFrom` al crear/editar un scoop.
+
+    Si se pasa `app`, el namespace se autoderiva a `user-apps-<app>` y se
+    filtra por la label de la app, para que solo vea recursos de su propia app.
     ---
     tags: [Scoops]
     parameters:
-      - {name: namespace, in: query, type: string,
-        description: 'Namespace donde buscar; cae a DEFAULT_NAMESPACE si se omite'}
       - {name: app, in: query, type: string,
-        description: 'Filtra por la label app.kubernetes.io/laurel-app del recurso'}
+        description: 'Filtra por la label app y autoderiva el namespace a user-apps-<app>'}
+      - {name: namespace, in: query, type: string,
+        description: 'Override del namespace (default: user-apps-<app> si hay app, sino DEFAULT_NAMESPACE)'}
       - {name: exclude_application, in: query, type: string,
         description: 'Si llega y coincide con un recurso auto-detectado (<app>-config / <app>-secret), se omite para no duplicar la inyeccion automatica'}
     responses:
       200: {description: Lista unificada de CM y Secret con un campo kind}
     """
+    app_filter = request.args.get("app")
     namespace = (
         request.args.get("namespace")
-        or current_app.config["DEFAULT_NAMESPACE"]
+        or (f"user-apps-{app_filter}" if app_filter else current_app.config["DEFAULT_NAMESPACE"])
     )
-    app_filter = request.args.get("app")
     exclude_app = request.args.get("exclude_application")
     cms = ConfigStoreService.list_configmaps(namespace, app_filter)
     secrets = ConfigStoreService.list_secrets(namespace, app_filter)
@@ -118,6 +121,12 @@ def available_env_from():
 @bp.post("")
 def create_scoop():
     """Crea un scoop (el puerto 3xxx se asigna automaticamente)
+
+    El `url_registry` es IMPLICITO al seleccionar la app: si el scoop se
+    asocia a una `Application` con `docker_image_base`, el registry se
+    deriva como `<docker_image_base>:<version|latest>`. El caller no
+    necesita (ni debe) mandar `url_registry` cuando el scoop esta
+    ligado a una app.
     ---
     tags: [Scoops]
     parameters:
@@ -126,10 +135,11 @@ def create_scoop():
         required: true
         schema:
           type: object
-          required: [application, url_registry]
+          required: [application]
           properties:
             name: {type: string, description: 'Opcional: se deriva de application'}
             application: {type: string, example: portafolio-web}
+            application_id: {type: integer, description: 'ID de la Application (preferido sobre `application` slug)'}
             type: {type: string, enum: [api, worker, cronjob], default: api}
             version: {type: string, example: 1.4.2}
             is_productive: {type: boolean, default: false}
@@ -139,11 +149,12 @@ def create_scoop():
             limit_memory: {type: string, default: 512Mi}
             min_replicas: {type: integer, default: 1}
             max_replicas: {type: integer, default: 1}
-            url_registry: {type: string, example: 'ghcr.io/lobaton/portafolio:latest'}
+            url_registry: {type: string, description: 'Solo para scoops SIN app (legacy). Si la app tiene docker_image_base, se ignora y se usa el de la app.'}
             namespace: {type: string, default: prod}
             schedule: {type: string, description: 'Obligatorio si type=cronjob'}
     responses:
       201: {description: Scoop creado}
+      400: {description: No se puede derivar url_registry (scoop sin app y sin url_registry)}
       409: {description: Nombre duplicado o sin puertos libres}
       422: {description: Datos invalidos}
     """

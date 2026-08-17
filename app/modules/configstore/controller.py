@@ -1,5 +1,5 @@
 """HTTP endpoints de ConfigMaps y Secrets de aplicacion."""
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from app.core.http import parse_body
 from app.modules.audits.service import AuditService
@@ -14,10 +14,21 @@ from app.modules.configstore.service import ConfigStoreService
 bp = Blueprint("configstore", __name__, url_prefix="/api/configstore")
 
 
-def _ns() -> str:
-    """Namespace de la query o el default del cluster."""
-    from flask import current_app
-    return request.args.get("namespace") or current_app.config["DEFAULT_NAMESPACE"]
+def _ns(app: str | None = None) -> str:
+    """Namespace destino para listar / crear recursos.
+
+    Precedencia:
+    1. `?namespace=<ns>` explicito del caller (override).
+    2. `?app=<slug>` -> `user-apps-<slug>` (cada app maneja todo en su
+       namespace, asi filtrar por app filtra por namespace automaticamente).
+    3. DEFAULT_NAMESPACE del cluster.
+    """
+    explicit = request.args.get("namespace")
+    if explicit:
+        return explicit
+    if app:
+        return ConfigStoreService.namespace_for_app(app)
+    return current_app.config["DEFAULT_NAMESPACE"]
 
 
 def _serialize_cm(cm: dict) -> dict:
@@ -35,18 +46,22 @@ def _serialize_secret(s: dict) -> dict:
 
 @bp.get("/configmaps")
 def list_configmaps():
-    """Lista ConfigMaps de aplicacion en un namespace
+    """Lista ConfigMaps visibles para una app en su namespace.
+
+    Cada app maneja su config independientemente: cuando se pasa `app`, el
+    namespace se autoderiva a `user-apps-<slug>` y ademas se filtra por
+    el label `app.kubernetes.io/laurel-app=<slug>`. Asi dos apps distintas
+    jamas ven los ConfigMaps de la otra.
     ---
     tags: [ConfigStore]
     parameters:
-      - {name: namespace, in: query, type: string, default: prod}
-      - {name: app, in: query, type: string, description: 'Filtra por nombre de aplicacion (Scoop.application)'}
+      - {name: app, in: query, type: string, description: 'Filtra por app (slug) y autoderiva el namespace a user-apps-<slug>.'}
+      - {name: namespace, in: query, type: string, description: 'Override del namespace (default: user-apps-<app> si hay app, sino DEFAULT_NAMESPACE)'}
     responses:
-      200: {description: ConfigMaps (resumen, sin data)}
+      200: {description: ConfigMaps (resumen, sin data) filtrados por app}
     """
-    namespace = _ns()
     app = request.args.get("app")
-    return jsonify(ConfigStoreService.list_configmaps(namespace, app))
+    return jsonify(ConfigStoreService.list_configmaps(_ns(app), app))
 
 
 @bp.get("/configmaps/<namespace>/<name>")
@@ -79,7 +94,7 @@ def create_configmap():
           properties:
             app: {type: string, description: 'Scoop.application al que se vincula'}
             name: {type: string, description: 'Nombre del ConfigMap (default: <app>-config)'}
-            namespace: {type: string, description: 'Namespace destino (default: prod)'}
+            namespace: {type: string, description: 'Namespace destino (default: user-apps-<app>)'}
             data: {type: object, additionalProperties: {type: string}}
     responses:
       200: {description: ConfigMap creado o reemplazado (campo `action` indica cual)}
@@ -159,18 +174,20 @@ def delete_configmap(namespace: str, name: str):
 
 @bp.get("/secrets")
 def list_secrets():
-    """Lista Secrets de aplicacion en un namespace
+    """Lista Secrets visibles para una app en su namespace.
+
+    Mismo principio que los ConfigMaps: cada app solo ve los Secrets
+    creados en su namespace con su label.
     ---
     tags: [ConfigStore]
     parameters:
-      - {name: namespace, in: query, type: string, default: prod}
-      - {name: app, in: query, type: string, description: 'Filtra por nombre de aplicacion'}
+      - {name: app, in: query, type: string, description: 'Filtra por app (slug) y autoderiva el namespace a user-apps-<slug>.'}
+      - {name: namespace, in: query, type: string, description: 'Override del namespace (default: user-apps-<app> si hay app, sino DEFAULT_NAMESPACE)'}
     responses:
-      200: {description: Secrets (resumen, sin data)}
+      200: {description: Secrets (resumen, sin data) filtrados por app}
     """
-    namespace = _ns()
     app = request.args.get("app")
-    return jsonify(ConfigStoreService.list_secrets(namespace, app))
+    return jsonify(ConfigStoreService.list_secrets(_ns(app), app))
 
 
 @bp.get("/secrets/<namespace>/<name>")

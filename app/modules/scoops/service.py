@@ -1,4 +1,6 @@
 """CRUD del catalogo de scoops."""
+import logging
+
 from flask import current_app
 from sqlalchemy.exc import IntegrityError
 
@@ -8,6 +10,8 @@ from app.modules.audits.service import AuditService
 from app.modules.apps.model import Application
 from app.modules.scoops.model import Scoop
 from app.modules.scoops.schema import format_memory
+
+logger = logging.getLogger(__name__)
 
 # Campos que se auditan al crear/actualizar.
 _TRACKED_FIELDS = (
@@ -157,16 +161,33 @@ class ScoopService:
             if app is None:
                 raise NotFoundError(f"No existe la aplicacion con id {application_id}")
 
-        # url_registry: si el caller lo manda, lo respeta. Si NO y la app tiene
-        # docker_image_base, derivamos `<image_base>:<version|latest>`.
+        # url_registry es IMPLICITO al seleccionar la app: si la app tiene
+        # `docker_image_base`, derivamos `<image_base>:<version|latest>` y
+        # ese es el registry del scoop. Si el caller pasa `url_registry`
+        # Y la app tiene image, ignoramos el del caller y usamos el de la
+        # app (registramos un warning si difieren, para que sea visible
+        # en logs pero sin romper el flujo).
+        #
+        # El caller puede seguir mandando `url_registry` como override
+        # SOLO si el scoop NO esta ligado a una app con image (caso
+        # legacy / scoop libre). Esto preserva la API para clientes que
+        # no usan el binding application_id.
         url_registry = data.get("url_registry")
-        if not url_registry and app and app.docker_image_base:
+        if app and app.docker_image_base:
             tag = data.get("version") or "latest"
-            url_registry = f"{app.docker_image_base}:{tag}"
+            derived = f"{app.docker_image_base}:{tag}"
+            if url_registry and url_registry != derived:
+                logger.warning(
+                    "scoop_create: caller paso url_registry=%s pero la app %s "
+                    "tiene docker_image_base=%s; usando el de la app",
+                    url_registry, app.slug, app.docker_image_base,
+                )
+            url_registry = derived
         if not url_registry:
             raise AppError(
-                "url_registry es obligatorio: mandalo en el body o asocia el scoop "
-                "a una Application con docker_image_base.",
+                "No se puede derivar url_registry: el scoop debe estar "
+                "asociado a una Application con docker_image_base, o el "
+                "caller debe mandar url_registry explicitamente.",
                 status_code=400,
             )
 
