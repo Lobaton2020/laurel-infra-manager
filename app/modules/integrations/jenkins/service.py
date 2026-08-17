@@ -61,17 +61,35 @@ class JenkinsService:
 
     @staticmethod
     def _get_crumb() -> str:
-        """Obtiene el crumb de CSRF de Jenkins para incluir en POSTs."""
+        """Obtiene el crumb de CSRF de Jenkins para incluir en POSTs.
+
+        Intenta obtener el crumb. Si falla (crumb issuer no configurado,
+        endpoint distinto, o error), retorna "" para que el request
+        continúe sin crumb (funciona si Jenkins tiene seguridad desactivada).
+        """
         base = JenkinsService._base_url()
         url = f"{base}{JENKINS_CRUMB_URL}"
         try:
             resp = requests.get(url, timeout=JENKINS_TIMEOUT)
+            # Si el endpoint no existe (404) o hay otro error, retornamos
+            # vacío para no bloquear el build cuando Jenkins no tiene crumb issuer.
+            if resp.status_code != 200:
+                logger.warning(
+                    "Crumb issuer status %s en %s, continuando sin crumb",
+                    resp.status_code, url
+                )
+                return ""
             resp.raise_for_status()
-            # Formato: "Jenkins-Crumb: abc123"
             crumb_field = resp.text.strip()
+            if not crumb_field:
+                logger.warning("Crumb vacío obtenido de %s", url)
+                return ""
             return crumb_field
         except requests.RequestException as exc:
-            logger.warning("No se pudo obtener crumb de Jenkins: %s", exc)
+            logger.warning(
+                "No se pudo obtener crumb de %s: %s (continuando sin crumb)",
+                url, exc
+            )
             return ""
 
     @staticmethod
