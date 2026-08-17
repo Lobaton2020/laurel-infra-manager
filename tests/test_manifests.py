@@ -5,8 +5,10 @@ verifica sobre los dicts generados. Patron canonico: ver deploy/base/ de
 Manejo-Finanzas.
 """
 import pytest
+from flask import current_app
 
 from app.core.constants import MANAGED_BY
+from app.modules.apps.model import Application
 from app.modules.scoops.manifest import ManifestService
 from app.modules.scoops.model import Scoop
 
@@ -201,6 +203,31 @@ class TestNamespaceAndLabels:
                 make_scoop(min_replicas=1, max_replicas=3)
             )]
         assert kinds.index("Deployment") < kinds.index("Service")
+
+
+class TestNamespaceResolution:
+    """namespace_for: override del caller > scoop.namespace > application.slug > default."""
+
+    def _bound_scoop(self, **overrides) -> Scoop:
+        scoop = make_scoop(**overrides)
+        app = Application(id=42, name="mi-app", slug="mi-app")
+        scoop.app_record = app
+        return scoop
+
+    def test_app_slug_used_when_bound_without_override(self, app):
+        with app.app_context():
+            scoop = self._bound_scoop(namespace=None, application_id=42)
+            assert ManifestService.namespace_for(scoop) == "mi-app"
+
+    def test_explicit_caller_override_wins(self, app):
+        with app.app_context():
+            scoop = self._bound_scoop(namespace="custom-ns", application_id=42)
+            assert ManifestService.namespace_for(scoop) == "custom-ns"
+
+    def test_legacy_scoop_falls_back_to_default(self, app):
+        with app.app_context():
+            scoop = make_scoop(namespace=None, application_id=None)
+            assert ManifestService.namespace_for(scoop) == current_app.config["DEFAULT_NAMESPACE"]
 
 
 class TestPreviewEndpoint:

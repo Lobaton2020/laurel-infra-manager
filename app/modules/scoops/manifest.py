@@ -60,7 +60,15 @@ class ManifestService:
 
     @staticmethod
     def namespace_for(scoop, namespace: str | None = None) -> str:
-        return namespace or scoop.namespace or current_app.config["DEFAULT_NAMESPACE"]
+        # Prioridad: override del caller > scoop.namespace > application.slug > default.
+        if namespace:
+            return namespace
+        if scoop.namespace:
+            return scoop.namespace
+        app = getattr(scoop, "app_record", None)
+        if scoop.application_id and app and app.slug:
+            return app.slug
+        return current_app.config["DEFAULT_NAMESPACE"]
 
     @staticmethod
     def _resources(scoop) -> dict:

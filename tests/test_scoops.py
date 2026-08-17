@@ -5,6 +5,12 @@ from app.core.errors import AppError
 from app.modules.scoops import service as scoops_service
 
 
+def _create_app(client, name: str) -> dict:
+    resp = client.post("/api/apps", json={"name": name})
+    assert resp.status_code == 201
+    return resp.get_json()
+
+
 class TestCreate:
     def test_create_assigns_first_free_port(self, client, scoop_payload):
         response = client.post("/api/scoops", json=scoop_payload)
@@ -183,6 +189,42 @@ class TestReadUpdateDelete:
         # Deployment/Service con el mismo nombre de sesiones anteriores de pruebas).
         assert client.delete(f"/api/scoops/{created['id']}?force=true").status_code == 200
         assert client.get(f"/api/scoops/{created['id']}").status_code == 404
+
+
+class TestApplicationBinding:
+    """Vinculacion Scoop <-> Application via application_id."""
+
+    def test_create_with_valid_application_id(self, client, scoop_payload):
+        app_record = _create_app(client, "Mi App")
+        response = client.post(
+            "/api/scoops", json={**scoop_payload, "application_id": app_record["id"]}
+        )
+        assert response.status_code == 201
+        data = response.get_json()
+        assert data["application_id"] == app_record["id"]
+        assert data["application_slug"] == app_record["slug"]
+
+    def test_create_with_missing_application_id_conflicts(self, client, scoop_payload):
+        response = client.post("/api/scoops", json={**scoop_payload, "application_id": 999})
+        assert response.status_code == 404
+        assert "aplicacion" in response.get_json()["error"]
+
+    def test_update_changes_application_id(self, client, scoop_payload):
+        created = client.post("/api/scoops", json=scoop_payload).get_json()
+        app_record = _create_app(client, "Otra App")
+
+        response = client.put(
+            f"/api/scoops/{created['id']}", json={"application_id": app_record["id"]}
+        )
+        assert response.status_code == 200
+        assert response.get_json()["application_slug"] == app_record["slug"]
+
+    def test_update_to_missing_application_id_conflicts(self, client, scoop_payload):
+        created = client.post("/api/scoops", json=scoop_payload).get_json()
+        response = client.put(
+            f"/api/scoops/{created['id']}", json={"application_id": 999}
+        )
+        assert response.status_code == 404
 
 
 class TestAudit:

@@ -96,6 +96,7 @@ class ScoopBase(BaseModel):
     # una aplicacion, asi que el nombre por defecto es el de la aplicacion.
     name: Optional[str] = Field(None, max_length=63)
     application: str = Field(..., min_length=1, max_length=100)
+    application_id: Optional[int] = None
     type: ComponentType = "api"
     version: Optional[str] = Field(None, max_length=100)
     is_productive: bool = False
@@ -174,6 +175,7 @@ class ScoopUpdate(BaseModel):
     recursos huerfanos en el cluster."""
 
     application: Optional[str] = Field(None, min_length=1, max_length=100)
+    application_id: Optional[int] = None
     version: Optional[str] = Field(None, max_length=100)
     status: Optional[ScoopStatus] = None
     is_productive: Optional[bool] = None
@@ -223,6 +225,8 @@ class ScoopResponse(BaseModel):
     id: int
     name: str
     application: str
+    application_id: Optional[int] = None
+    application_slug: Optional[str] = None
     type: ComponentType
     status: ScoopStatus
     version: Optional[str] = None
@@ -261,10 +265,13 @@ class ScoopResponse(BaseModel):
     def from_scoop(cls, scoop) -> "ScoopResponse":
         req_val, req_unit = to_decimal_megabytes(scoop.requested_memory)
         lim_val, lim_unit = to_decimal_megabytes(scoop.limit_memory)
+        app_record = getattr(scoop, "app_record", None)
         return cls(
             id=scoop.id,
             name=scoop.name,
             application=scoop.application,
+            application_id=scoop.application_id,
+            application_slug=app_record.slug if app_record else None,
             type=scoop.type,
             status=scoop.status,
             version=scoop.version,

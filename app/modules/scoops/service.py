@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.db import db
 from app.core.errors import AppError, ConflictError, NotFoundError
 from app.modules.audits.service import AuditService
+from app.modules.apps.model import Application
 from app.modules.scoops.model import Scoop
 from app.modules.scoops.schema import format_memory
 
@@ -149,9 +150,14 @@ class ScoopService:
 
         # El servidor decide container_port y health_path. No los pedimos al usuario
         # para mantener el form simple: el puerto interno se hereda de config.
+        application_id = data.get("application_id")
+        if application_id is not None and not db.session.get(Application, application_id):
+            raise NotFoundError(f"No existe la aplicacion con id {application_id}")
+
         payload = {
             "name": data["name"],
             "application": data["application"],
+            "application_id": application_id,
             "type": data.get("type", "api"),
             "version": data.get("version"),
             "is_productive": data.get("is_productive", False),
@@ -204,6 +210,13 @@ class ScoopService:
         ):
             if data.get(field) is not None:
                 setattr(scoop, field, data[field])
+
+        # application_id puede venir como cambio explicito (o null para desvincular).
+        if "application_id" in data:
+            application_id = data["application_id"]
+            if application_id is not None and not db.session.get(Application, application_id):
+                raise NotFoundError(f"No existe la aplicacion con id {application_id}")
+            scoop.application_id = application_id
 
         # Memoria: acepta la cantidad completa ("128Mi") o value+unit suelto.
         for prefix in ("requested_memory", "limit_memory"):
