@@ -29,6 +29,8 @@ spec:
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
+            - name: init-scripts
+              mountPath: /var/jenkins_home/init.groovy.d
           readinessProbe:
             httpGet:
               path: /login
@@ -54,6 +56,30 @@ spec:
         - name: jenkins-home
           persistentVolumeClaim:
             claimName: jenkins-home
+        - name: init-scripts
+          configMap:
+            name: jenkins-init-scripts
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-init-scripts
+data:
+  disable-csrf.groovy: |
+    import jenkins.model.Jenkins
+    import hudson.security.csrf.GlobalCrumbIssuerConfiguration
+
+    def jenkins = Jenkins.getInstance()
+    def crumbIssuer = jenkins.getCrumbIssuer()
+
+    if (crumbIssuer != null) {
+        println "Deshabilitando CSRF..."
+        jenkins.setCrumbIssuer(null)
+        jenkins.save()
+        println "✅ CSRF DESHABILITADO"
+    } else {
+        println "ℹ️ CSRF ya estaba deshabilitado"
+    }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -65,4 +91,4 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi  # ← Cambiado a 10Gi para que coincida con el existente
+      storage: 10Gi
