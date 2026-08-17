@@ -506,3 +506,17 @@ class K8sService:
             if exc.status == 409:
                 return {"name": namespace, "existed": True}
             raise
+
+    @staticmethod
+    def delete_namespace(namespace: str) -> dict:
+        """Borra un namespace K8s (cascade: borra todos los recursos dentro).
+
+        404 si no existe (idempotente)."""
+        clients = get_clients()
+        try:
+            clients.core.delete_namespace(namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                return {"name": namespace, "deleted": False, "existed": False}
+            raise
+        return {"name": namespace, "deleted": True}

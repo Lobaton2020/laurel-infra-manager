@@ -76,3 +76,63 @@ class ContainerRegistryService:
     def suggested_base(slug: str) -> str:
         """Genera el image_base sugerido: `ghcr.io/<owner>/laurel_<slug>`."""
         return f"ghcr.io/{_get_owner()}/{PREFIX}{slug}"
+
+    @staticmethod
+    def delete_package(slug: str) -> dict:
+        """Borra el paquete GHCR `ghcr.io/<owner>/<repo>`.
+
+        Auth: el PAT se intercambia por un JWT bearer contra
+        `ghcr.io/token?service=ghcr.io&scope=repository:<owner>/<repo>:delete`
+        (Basic auth con owner+PAT). Requiere scope `delete:packages` en el PAT.
+        404 si el paquete no existe.
+        """
+        import requests
+        from app.modules.system.service import SystemSecretService
+        from flask import current_app
+
+        owner = _get_owner()
+        name = _repo_name(slug)
+
+        # Resolver PAT: prioridad .env, fallback system secret del cluster.
+        pat = (current_app.config.get("GITHUB_PAT") or "").strip()
+        if not pat:
+            try:
+                content = SystemSecretService.get_content("github_pat")["content"]
+                pat = (content or "").strip()
+            except Exception:
+                pat = ""
+        if not pat:
+            logger.warning("ghcr_delete_package sin PAT; saltando")
+            return {"deleted": False, "skipped": "pat_missing"}
+
+        # Token exchange contra ghcr.io.
+        try:
+            tok = requests.get(
+                "https://ghcr.io/token",
+                params={
+                    "service": "ghcr.io",
+                    "scope": f"repository:{owner}/{name}:delete",
+                },
+                auth=(owner, pat),
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            logger.warning("ghcr_token_exchange fallo: %s", exc)
+            return {"deleted": False, "error": str(exc)}
+        if tok.status_code != 200:
+            return {"deleted": False, "error": f"token exchange {tok.status_code}"}
+        bearer = tok.json().get("token", "")
+
+        try:
+            r = requests.delete(
+                f"https://ghcr.io/v2/{owner}/{name}/",
+                headers={"Authorization": f"Bearer {bearer}"},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return {"deleted": False, "error": str(exc)}
+        if r.status_code in (202, 204):
+            return {"deleted": True, "name": name}
+        if r.status_code == 404:
+            return {"deleted": False, "name": name, "existed": False}
+        return {"deleted": False, "error": f"ghcr {r.status_code}: {r.text[:200]}"}

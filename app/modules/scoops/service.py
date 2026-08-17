@@ -151,8 +151,24 @@ class ScoopService:
         # El servidor decide container_port y health_path. No los pedimos al usuario
         # para mantener el form simple: el puerto interno se hereda de config.
         application_id = data.get("application_id")
-        if application_id is not None and not db.session.get(Application, application_id):
-            raise NotFoundError(f"No existe la aplicacion con id {application_id}")
+        app: Application | None = None
+        if application_id is not None:
+            app = db.session.get(Application, application_id)
+            if app is None:
+                raise NotFoundError(f"No existe la aplicacion con id {application_id}")
+
+        # url_registry: si el caller lo manda, lo respeta. Si NO y la app tiene
+        # docker_image_base, derivamos `<image_base>:<version|latest>`.
+        url_registry = data.get("url_registry")
+        if not url_registry and app and app.docker_image_base:
+            tag = data.get("version") or "latest"
+            url_registry = f"{app.docker_image_base}:{tag}"
+        if not url_registry:
+            raise AppError(
+                "url_registry es obligatorio: mandalo en el body o asocia el scoop "
+                "a una Application con docker_image_base.",
+                status_code=400,
+            )
 
         payload = {
             "name": data["name"],
@@ -171,7 +187,7 @@ class ScoopService:
             ),
             "min_replicas": data.get("min_replicas", 1),
             "max_replicas": data.get("max_replicas", 1),
-            "url_registry": data["url_registry"],
+            "url_registry": url_registry,
             "namespace": data.get("namespace") or current_app.config["DEFAULT_NAMESPACE"],
             "schedule": data.get("schedule"),
             "container_port": data.get("container_port") or current_app.config["CONTAINER_PORT"],

@@ -198,19 +198,166 @@ class AppsService:
 
     @staticmethod
     def soft_delete(app_id: int) -> Application:
-        """Soft-delete: marca `deleted_at`. NO toca el cluster.
+        """Elimina ABSOLUTAMENTE TODO lo asociado a la app.
 
-        Para borrar el namespace del cluster, usar `force_delete` (futura
-        implementacion en otra fase; por ahora solo se hace soft-delete).
+        Antes del borrado, guarda un snapshot completo de la config en
+        `AppDeletionLog` para trazabilidad. Despues elimina:
+        - K8s: namespace `user-apps-<slug>` (cascade: secrets, configmaps,
+          deployments, services, ingresses, hpa, jobs, etc.).
+        - DB: marca la app como soft-deleted, marca scoops y dominios como
+          archived/deleted, y borra los eventos del timeline.
+        - GitHub: borra el repo `laurel_<slug>` en la org.
+        - GHCR: borra el paquete `laurel_<slug>` en GHCR.
+
+        Si algun paso externo falla (k8s/github/ghcr), logueamos warning
+        y seguimos con el resto: la app debe quedar eliminada en la BD.
         """
+        from app.modules.apps.model import AppDeletionLog
+        from app.modules.cluster.service import K8sService
+        from app.modules.domains.model import Domain
+        from app.modules.integrations.docker.service import ContainerRegistryService
+        from app.modules.integrations.github.service import GitHubService
+        from app.modules.scoops.model import Scoop, STATUS_ARCHIVED
+
         app = AppsService.get(app_id)
+        slug = app.slug
+        ns = f"user-apps-{slug}"
+
+        # 0) Snapshot completo de la config para trazabilidad.
+        snapshot = AppsService._snapshot_for_deletion(app_id, ns)
+        try:
+            from flask import g
+            user = getattr(g, "user", None)
+            deleted_by = user.get("email") or user.get("sub") if user else None
+        except RuntimeError:
+            deleted_by = None
+        log_row = AppDeletionLog(
+            application_id=app.id,
+            application_slug=slug,
+            application_name=app.name,
+            workspace_id=app.workspace_id,
+            snapshot=snapshot,
+            deleted_by=deleted_by,
+        )
+        db.session.add(log_row)
+        db.session.flush()  # para que la FK exista antes de tocar la app
+
+        # 1) K8s: borrar el namespace (cascade todos los recursos dentro).
+        try:
+            if K8sService.namespace_exists(ns):
+                K8sService.delete_namespace(ns)
+                logger.info("app_force_delete: namespace %s borrado", ns)
+        except Exception as exc:
+            logger.warning("app_force_delete: fallo borrando namespace %s: %s", ns, exc)
+
+        # 2) GitHub: borrar el repo (si se creo).
+        try:
+            if GitHubService.repo_exists(slug):
+                GitHubService.delete_repo(slug)
+                logger.info("app_force_delete: repo GitHub borrado para %s", slug)
+        except Exception as exc:
+            logger.warning("app_force_delete: fallo borrando repo GitHub para %s: %s", slug, exc)
+
+        # 3) GHCR: borrar el paquete (si existe).
+        try:
+            ContainerRegistryService.delete_package(slug)
+        except Exception as exc:
+            logger.warning("app_force_delete: fallo borrando paquete GHCR para %s: %s", slug, exc)
+
+        # 4) DB: marcar scoops como archived y dominios como deleted,
+        #    luego soft-delete la app y limpiar eventos del timeline.
+        Scoop.query.filter(Scoop.application_id == app.id).update(
+            {Scoop.status: STATUS_ARCHIVED}, synchronize_session=False
+        )
+        Domain.query.filter(
+            Domain.application_id == app.id, Domain.deleted_at.is_(None)
+        ).update({Domain.deleted_at: utcnow()}, synchronize_session=False)
+        # Borrar eventos del timeline (FK cascade al hacer delete de la app).
+        from app.modules.apps.model import AppEvent
+        AppEvent.query.filter(AppEvent.application_id == app.id).delete(
+            synchronize_session=False
+        )
         app.deleted_at = utcnow()
         db.session.commit()
         AuditService.log(
-            "app_soft_delete", "application", app.id,
-            {"slug": app.slug},
+            "app_force_delete", "application", app.id,
+            {"slug": slug, "namespace": ns, "deletion_log_id": log_row.id},
         )
         return app
+
+    @staticmethod
+    def _snapshot_for_deletion(app_id: int, namespace: str) -> dict:
+        """Captura el estado completo de la app al momento del borrado."""
+        from app.modules.scoops.model import Scoop
+        from app.modules.domains.model import Domain
+        from app.modules.apps.model import AppEvent
+
+        app = AppsService.get(app_id)
+        scoops = Scoop.query.filter(Scoop.application_id == app_id).all()
+        domains = Domain.query.filter(Domain.application_id == app_id).all()
+        events = AppEvent.query.filter(AppEvent.application_id == app_id).all()
+
+        k8s_resources = {"configmaps": [], "secrets": []}
+        try:
+            from app.modules.cluster.service import K8sService
+            from app.core.k8s import get_clients
+            clients = get_clients()
+            try:
+                cms = clients.core.list_namespaced_config_map(
+                    namespace, label_selector=f"app={app.slug}"
+                ).items
+                k8s_resources["configmaps"] = [
+                    {"name": cm.metadata.name, "namespace": cm.metadata.namespace,
+                     "labels": cm.metadata.labels or {}}
+                    for cm in cms
+                ]
+            except Exception:
+                pass
+            try:
+                secs = clients.core.list_namespaced_secret(
+                    namespace, label_selector=f"app={app.slug}"
+                ).items
+                k8s_resources["secrets"] = [
+                    {"name": s.metadata.name, "namespace": s.metadata.namespace,
+                     "labels": s.metadata.labels or {},
+                     "keys": sorted((s.data or {}).keys())}
+                    for s in secs
+                ]
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning("snapshot_k8s_failed: %s", exc)
+
+        return {
+            "app": {
+                "id": app.id,
+                "name": app.name,
+                "slug": app.slug,
+                "description": app.description,
+                "github_repo_url": app.github_repo_url,
+                "docker_image_base": app.docker_image_base,
+                "workspace_id": app.workspace_id,
+                "status": app.status,
+                "created_at": app.created_at.isoformat() if app.created_at else None,
+            },
+            "scoops": [
+                {"id": s.id, "name": s.name, "type": s.type, "version": s.version,
+                 "url_registry": s.url_registry, "namespace": s.namespace,
+                 "is_productive": s.is_productive, "status": s.status}
+                for s in scoops
+            ],
+            "domains": [
+                {"id": d.id, "host": d.host, "scoop_id": d.scoop_id}
+                for d in domains
+            ],
+            "events": [
+                {"event": e.event, "status": e.status, "detail": e.detail,
+                 "created_at": e.created_at.isoformat() if e.created_at else None}
+                for e in events
+            ],
+            "k8s_namespace": namespace,
+            "k8s_resources": k8s_resources,
+        }
 
     @staticmethod
     def archive_for_app(app_id: int) -> int:

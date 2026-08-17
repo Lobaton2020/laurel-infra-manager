@@ -57,7 +57,7 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.configurator.records.model import Record  # noqa: F401
     from app.modules.configurator.schemas.model import Column, Schema  # noqa: F401
     from app.modules.users.model import User  # noqa: F401
-    from app.modules.apps.model import AppEvent, Application  # noqa: F401
+    from app.modules.apps.model import AppDeletionLog, AppEvent, Application  # noqa: F401
     from app.modules.workspaces.model import Workspace  # noqa: F401
     from app.modules.scoops.model import Scoop  # noqa: F401
     from app.modules.domains.model import Domain  # noqa: F401

@@ -169,3 +169,26 @@ class GitHubService:
             resp.status_code, resp.text[:200],
         )
         return False
+
+    @staticmethod
+    def delete_repo(slug: str) -> dict:
+        """Borra el repo `<org>/laurel_<slug>`. 404 si no existe."""
+        _validate_slug(slug)
+        org = _get_org()
+        name = _repo_name(slug)
+        pat = _get_pat()
+        resp = requests.delete(
+            f"{GITHUB_API}/repos/{org}/{name}",
+            headers={
+                "Authorization": f"token {pat}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (204, 404):
+            return {"deleted": resp.status_code == 204, "name": name}
+        raise AppError(
+            f"GitHub delete_repo error {resp.status_code}: {resp.text[:200]}",
+            status_code=502,
+        )

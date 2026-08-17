@@ -2,7 +2,7 @@
 from flask import Blueprint, jsonify, request
 
 from app.core.http import pagination
-from app.modules.apps.model import AppEvent
+from app.modules.apps.model import AppDeletionLog, AppEvent
 from app.modules.apps.schema import (
     ApplicationCreate,
     ApplicationListResponse,
@@ -119,6 +119,25 @@ def get_app_events(app_id: int):
     """
     app = AppsService.get(app_id)
     return jsonify({"items": [e.to_dict() for e in app.events]})
+
+
+@bp.get("/<int:app_id>/deletion-logs")
+def get_app_deletion_logs(app_id: int):
+    """Snapshots guardados al borrar esta Application (trazabilidad)
+    ---
+    tags: [Apps]
+    parameters:
+      - {name: app_id, in: path, required: true, type: integer}
+    responses:
+      200: {description: Lista de deletion logs (uno por borrado)}
+    """
+    logs = (
+        AppDeletionLog.query
+        .filter_by(application_id=app_id)
+        .order_by(AppDeletionLog.deleted_at.desc())
+        .all()
+    )
+    return jsonify({"items": [l.to_dict() for l in logs]})
 
 
 @bp.put("/<int:app_id>")

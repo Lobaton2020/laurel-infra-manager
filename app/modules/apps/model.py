@@ -104,3 +104,36 @@ class AppEvent(db.Model):
             "detail": self.detail,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class AppDeletionLog(db.Model):
+    """Snapshot de toda la config de una Application al momento de borrarla.
+
+    Guarda el JSON completo de la app + scoops + dominios + timeline de
+    eventos + configmaps/secrets del namespace K8s. Asi, aunque el borrado
+    elimina los recursos del cluster y marca los registros en BD, queda
+    trazabilidad para auditoria.
+    """
+
+    __tablename__ = "app_deletion_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    application_id = db.Column(db.Integer, nullable=False, index=True)
+    application_slug = db.Column(db.String(63), nullable=False)
+    application_name = db.Column(db.String(100), nullable=False)
+    workspace_id = db.Column(db.Integer)
+    snapshot = db.Column(db.JSON, nullable=False)
+    deleted_at = db.Column(db.DateTime, default=utcnow, nullable=False)
+    deleted_by = db.Column(db.String(200))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "application_id": self.application_id,
+            "application_slug": self.application_slug,
+            "application_name": self.application_name,
+            "workspace_id": self.workspace_id,
+            "snapshot": self.snapshot,
+            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
+            "deleted_by": self.deleted_by,
+        }

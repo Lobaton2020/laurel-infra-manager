@@ -117,7 +117,7 @@ class ScoopBase(BaseModel):
     min_replicas: int = Field(1, ge=0, le=100)
     max_replicas: int = Field(1, ge=1, le=100)
 
-    url_registry: str = Field(..., min_length=1, max_length=255)
+    url_registry: Optional[str] = Field(None, min_length=1, max_length=255)
     namespace: Optional[str] = Field(None, max_length=63)
     schedule: Optional[str] = Field(None, max_length=100)
 

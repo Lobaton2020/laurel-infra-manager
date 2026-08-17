@@ -1,0 +1,5 @@
+- LA UI para seleccionar una app y una workspace debe ser diferente en colores.
+- Cuando clickeosobre la app arriba deberia permitrme cambiar de app
+- Al eliminar un aapp debe eliminarla de verdad, guardar log de toda la config para trazavilidad.
+- AL crear un scoop el registry ya lo tiene por debajo no debe solicitarlo
+- Al crear secrets debe permitir subir .env
