@@ -5,6 +5,12 @@ metadata:
   namespace: prod
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Importante: GitHub firma el body con HMAC-SHA256. Traefik por default
+    # re-bufea el body y eso cambia los bytes, rompiendo la firma. Estas
+    # annotations le dicen a Traefik que NO toque el body en el path del
+    # webhook.
+    traefik.ingress.kubernetes.io/router.middlewares: prod-no-buffer@kubernetesingress
+    traefik.ingress.kubernetes.io/service.passhostheader: "true"
 spec:
   ingressClassName: traefik
   tls:
@@ -22,3 +28,18 @@ spec:
                 name: laurel-infra-manager
                 port:
                   number: 3006
+---
+# Middleware de Traefik que deshabilita el body buffering. Sin esto,
+# Traefik re-emite el body con bytes ligeramente distintos y rompe la
+# firma HMAC del webhook de GitHub.
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: no-buffer
+  namespace: prod
+spec:
+  buffering:
+    # Sin limite en el body size (Traefik por default limita a 2MiB)
+    maxRequestBodyBytes: 0
+    # No re-buferar: pasarlo tal cual llega
+    memRequestBodyBytes: 0
