@@ -191,4 +191,9 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 20Gi
+      # Ojo: k3s local-path NO soporta resize. Si subimos este valor y
+      # el PVC ya existe con 10Gi, `kubectl apply` falla con
+      # "only dynamically provisioned pvc can be resized". Para crecerlo,
+      # primero `kubectl delete pvc jenkins-home -n prod` (asume que no
+      # hay data critica) o migrar a un storage class que soporte resize.
+      storage: 10Gi
