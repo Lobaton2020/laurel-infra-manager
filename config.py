@@ -90,15 +90,19 @@ class Config:
     # (header X-Hub-Signature-256). Vacío = webhook deshabilitado (503).
     GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
-    # --- Integraciones: GitHub + GitHub Container Registry ---- 
+    # --- Integraciones: GitHub + Docker Hub ----
     # Modo legacy: los PATs se leen del .env. En el cluster prod tambien se
     # pueden guardar como system secrets (github_pat) y el servicio los
     # usa como fallback si la env esta vacia.
-    # GHCR (ghcr.io) NO requiere llamada HTTP para crear el repo: el paquete
-    # se materializa en el primer `docker push` desde Jenkins.
+    # Docker Hub (docker.io) SI requiere llamada HTTP para crear el repo:
+    # POST /v2/repositories/ desde apps/service.py al crear la app.
+    # El user de Docker Hub y la password/token tambien se leen del .env
+    # (o del system secret `docker_pat` como fallback).
     GITHUB_ORG = os.environ.get("GITHUB_ORG", "laurel-applications")
     GITHUB_PAT = os.environ.get("GITHUB_PAT", "")
-    GHCR_OWNER = os.environ.get("GHCR_OWNER", "laurel-applications")
+    DOCKERHUB_USER = os.environ.get("DOCKERHUB_USER", "aflobaton")
+    DOCKERHUB_PASSWORD = os.environ.get("DOCKERHUB_PASSWORD", "")
+    DOCKERHUB_TOKEN = os.environ.get("DOCKERHUB_TOKEN", "")  # alias
 
     # --- Base de datos ---
     DB_TYPE = os.environ.get("DB_TYPE", "sqlite")

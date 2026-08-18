@@ -60,8 +60,9 @@ class TestTriggerBuild:
         assert posted["url"] == "http://jenkins:8080/job/laurel_notas/buildWithParameters"
         assert posted["params"] == {"token": "tok123"}
         assert posted["timeout"] == jenkins_service.JENKINS_TIMEOUT
-        # El IMAGE se envia SIN registry ni tag (el job agrega ghcr.io/ y :${TAG}).
-        # GITHUB_PAT: el test no tiene app ni system secret -> "placeholder".
+        # El IMAGE se envia SIN registry ni tag (el job agrega docker.io/ y :${TAG}).
+        # Sin app en BD ni system secret -> password params "placeholder";
+        # el user se defaulta a "aflobaton" (igual que docker/service._get_user()).
         assert posted["data"] == {
             "SLUG": "notas",
             "TAG": "1.2.4",
@@ -69,6 +70,8 @@ class TestTriggerBuild:
             "IMAGE": "laurel_notas",
             "TEST_CMD": "echo '[no test_cmd configured]'",
             "GITHUB_PAT": "placeholder",
+            "DOCKERHUB_USER": "aflobaton",
+            "DOCKERHUB_PASSWORD": "placeholder",
         }
 
     def test_trigger_passes_custom_test_cmd(self, app, monkeypatch):

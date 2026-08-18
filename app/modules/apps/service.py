@@ -96,6 +96,7 @@ class AppsService:
         created_github_repo = False
         created_k8s_namespace = False
         created_jenkins_job = False
+        created_docker_repo = False
         ns = f"user-apps-{slug}"
 
         # Step 1: repo GitHub (si se pidio crearlo).
@@ -129,16 +130,47 @@ class AppsService:
                 "Falta GitHub: no se proporciono github_repo_url ni create_github_repo",
             ))
 
-        # Step 2: imagen de contenedor en GHCR. No requiere crear el repo
-        # (se materializa en el primer push), solo calculamos el base.
+        # Step 2: imagen de contenedor en Docker Hub. A diferencia de
+        # GHCR (que se materializa en el primer push), Docker Hub
+        # requiere un POST explicito a /v2/repositories/ para crear el
+        # repo. create_repo es idempotente (409 -> existed=True).
+        # Si falla, NO es fatal: la app se crea igual con status=error
+        # y el operador puede rotar las credenciales de Docker Hub y
+        # reintentar manualmente.
         if docker_base is None:
-            docker_base = ContainerRegistryService.suggested_base(slug)
-            events.append((
-                "ghcr_repo", "ok",
-                f"Imagen GHCR: {docker_base} (se crea en el primer push)",
-            ))
+            try:
+                result = ContainerRegistryService.create_repo(
+                    slug,
+                    description=data.get("description", ""),
+                )
+                user = result["namespace"]
+                docker_base = f"docker.io/{user}/{result['name']}"
+                created_docker_repo = not result.get("existed", False)
+                events.append((
+                    "docker_repo", "ok",
+                    f"Repo Docker Hub creado: {user}/{result['name']}"
+                    + (" (ya existia)" if result.get("existed") else ""),
+                ))
+            except AppError as exc:
+                # Fallo el create (creds mal, Docker Hub caido, etc).
+                # La app igual se crea, pero con status=error para que
+                # el operador lo note y pueda reintentar.
+                logger.warning(
+                    "docker_repo_failed para %s: %s", slug, exc.message
+                )
+                docker_base = ContainerRegistryService.suggested_base(slug)
+                events.append((
+                    "docker_repo", "error",
+                    f"No se pudo crear el repo en Docker Hub: {exc.message}. "
+                    f"Imagen base sugerida: {docker_base} (el job de Jenkins "
+                    "fallara al pushear hasta que se cree manualmente).",
+                ))
         else:
-            events.append(("ghcr_repo", "ok", f"Imagen base ya provista: {docker_base}"))
+            events.append((
+                "docker_repo", "ok",
+                f"Imagen base ya provista: {docker_base} "
+                "(asume que el repo en Docker Hub existe o lo creara el job)",
+            ))
 
         # Step 3: namespace K8s `user-apps-<slug>` (idempotente).
         from app.modules.cluster.service import K8sService
@@ -178,6 +210,7 @@ class AppsService:
                 slug=slug, ns=ns,
                 created_github=created_github_repo,
                 created_namespace=created_k8s_namespace,
+                created_docker=created_docker_repo,
             )
             raise ConflictError(
                 f"Ya existe una Application con name='{name}' o slug='{slug}'"
@@ -223,6 +256,7 @@ class AppsService:
                 slug=slug, ns=ns,
                 created_github=created_github_repo,
                 created_namespace=created_k8s_namespace,
+                created_docker=created_docker_repo,
                 created_jenkins=False,  # nunca llegamos a crearlo
             )
             raise AppError(
@@ -249,13 +283,15 @@ class AppsService:
              "status": app.status},
         )
         return app
-
     @staticmethod
     def _rollback_external(
-        slug: str, ns: str, *,
+        slug: str,
+        ns: str,
+        *,
         created_github: bool,
         created_namespace: bool,
         created_jenkins: bool = False,
+        created_docker: bool = False,
     ) -> None:
         """Best-effort cleanup de recursos externos cuando `create` falla.
 
@@ -264,6 +300,7 @@ class AppsService:
         rollback) es la que importa al usuario y la que se propaga.
         """
         from app.modules.cluster.service import K8sService
+        from app.modules.integrations.docker.service import ContainerRegistryService
         from app.modules.integrations.github.service import GitHubService
         from app.modules.integrations.jenkins.service import JenkinsService
 
@@ -283,6 +320,15 @@ class AppsService:
                 logger.warning(
                     "create_rollback: fallo borrando GitHub repo %s: %s", slug, exc,
                 )
+        if created_docker:
+            try:
+                ContainerRegistryService.delete_repo(slug)
+                logger.info("create_rollback: Docker Hub repo %s borrado", slug)
+            except Exception as exc:
+                logger.warning(
+                    "create_rollback: fallo borrando Docker Hub repo %s: %s",
+                    slug, exc,
+                )
         if created_jenkins:
             try:
                 JenkinsService.delete_job(slug)
@@ -291,7 +337,6 @@ class AppsService:
                 logger.warning(
                     "create_rollback: fallo borrando Jenkins job %s: %s", slug, exc,
                 )
-
     @staticmethod
     def update(app_id: int, data: dict) -> Application:
         app = AppsService.get(app_id)
@@ -329,10 +374,10 @@ class AppsService:
           CASCADE (se borran). Queda solo `app_deletion_logs` con el
           snapshot.
         - GitHub: borra el repo `laurel_<slug>` en la org.
-        - GHCR: borra el paquete `laurel_<slug>` en GHCR.
+        - Docker Hub: borra el repo `<user>/laurel_<slug>`.
         - Jenkins: borra el job `laurel_<slug>` con el pipeline CI/CD.
 
-        Si algun paso externo falla (k8s/github/ghcr/jenkins), logueamos
+        Si algun paso externo falla (k8s/github/docker/jenkins), logueamos
         warning y seguimos con el resto: la app debe quedar eliminada
         en la BD aunque queden recursos huerfanos en el cluster.
         """
@@ -382,11 +427,13 @@ class AppsService:
         except Exception as exc:
             logger.warning("app_hard_delete: fallo borrando repo GitHub para %s: %s", slug, exc)
 
-        # 3) GHCR: borrar el paquete (si existe).
+        # 3) Docker Hub: borrar el repo (si existe).
         try:
-            ContainerRegistryService.delete_package(slug)
+            if ContainerRegistryService.repo_exists(slug):
+                ContainerRegistryService.delete_repo(slug)
+                logger.info("app_hard_delete: repo Docker Hub borrado para %s", slug)
         except Exception as exc:
-            logger.warning("app_hard_delete: fallo borrando paquete GHCR para %s: %s", slug, exc)
+            logger.warning("app_hard_delete: fallo borrando repo Docker Hub para %s: %s", slug, exc)
 
         # 3.5) Jenkins: borrar el job `laurel_<slug>`. Asi no queda un job
         #      huerfano apuntando a un repo borrado. Si el cluster no tiene

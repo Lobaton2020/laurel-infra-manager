@@ -19,7 +19,8 @@ class TestConfig(Config):
     # Sin PATs en tests: las integraciones (GitHub/Docker Hub) siempre fallan
     # con 503 y el create de apps no hace llamadas HTTP reales.
     GITHUB_PAT = ""
-    DOCKER_HUB_TOKEN = ""
+    DOCKERHUB_USER = ""
+    DOCKERHUB_PASSWORD = ""
 
 
 @pytest.fixture

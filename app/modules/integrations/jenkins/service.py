@@ -132,12 +132,14 @@ class JenkinsService:
         configured'`); si llega vacio o None, se manda un placeholder para
         que Jenkins no falle por param faltante.
 
-        Ademas del test_cmd, inyectamos el `GITHUB_PAT` del backend (system
-        secret `github_pat` o env var `GITHUB_PAT`) como build parameter
-        PasswordParameter (auto-masked en logs). El job lo usa para
-        `git clone` de repos privados y para `docker login` en GHCR via
-        kaniko. Si el repo es publico y la app no escribe en GHCR, llega
-        como `placeholder` y el job cae al path sin auth.
+        Ademas del test_cmd, inyectamos las credenciales de Docker Hub del
+        backend (system secret `docker_pat` o env vars
+        `DOCKERHUB_USER`/`DOCKERHUB_PASSWORD`) como build parameters
+        PasswordParameter (auto-masked en logs). El job las usa para
+        `docker login` en docker.io via kaniko. El `git clone` de repos
+        privados de GitHub sigue usando `GITHUB_PAT` como env en el pod.
+        Si no hay credenciales de Docker Hub, llegan como `placeholder`
+        y el job cae al path sin auth (repo publico de solo-lectura).
 
         Auth por Jenkins build token (trigger remoto): el token va en el
         query param. Returns `{"job", "number", "url"}` donde `url` es
@@ -162,19 +164,45 @@ class JenkinsService:
         # configurado a algo real (pytest, npm test, etc).
         test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
 
-        # GITHUB_PAT: lo leemos igual que github/service.py (env var
-        # primero, fallback al system secret `github_pat`). Si no hay,
-        # mandamos "placeholder" y el job intenta sin auth (solo sirve
-        # para repos publicos sin push a GHCR).
+        # GITHUB_PAT: para `git clone` de repos privados (el job lo usa en
+        # STAGE 0). Lo leemos igual que github/service.py (env primero,
+        # fallback al system secret `github_pat`).
+        github_pat = ""
         try:
             from app.modules.integrations.github.service import _get_pat
             github_pat = _get_pat()
         except AppError:
             github_pat = ""
 
+        # Credenciales de Docker Hub: mismas fuentes que docker/service.py
+        # (env primero, fallback al system secret `docker_pat`).
+        # El job las necesita para hacer docker login y pushear a docker.io.
+        dockerhub_user = ""
+        dockerhub_pass = ""
+        try:
+            from flask import current_app
+            dockerhub_user = (
+                current_app.config.get("DOCKERHUB_USER") or ""
+            ).strip()
+            dockerhub_pass = (
+                current_app.config.get("DOCKERHUB_PASSWORD")
+                or current_app.config.get("DOCKERHUB_TOKEN")
+                or ""
+            ).strip()
+            if not dockerhub_pass:
+                from app.modules.system.service import SystemSecretService
+                content = SystemSecretService.get_content(
+                    "docker_pat"
+                )["content"]
+                dockerhub_pass = (content or "").strip()
+            if not dockerhub_user:
+                dockerhub_user = "aflobaton"
+        except AppError:
+            dockerhub_pass = ""
+
         # IMAGE: el job espera `owner/repo` sin registry ni tag (lo
-        # completa con `ghcr.io/${IMAGE}:${TAG}`). El operator puede
-        # haber puesto `ghcr.io/owner/repo:tag` en docker_image_base;
+        # completa con `docker.io/${IMAGE}:${TAG}`). El operator puede
+        # haber puesto `docker.io/owner/repo:tag` en docker_image_base;
         # limpiamos.
         image_no_registry = job
         # Leemos el image_base real del modelo para soportar overrides
@@ -201,9 +229,9 @@ class JenkinsService:
 
         logger.info(
             "jenkins.trigger_build START slug=%s tag=%s test_cmd_len=%d "
-            "image=%s has_pat=%s url=%s",
+            "image=%s has_dockerhub=%s url=%s",
             slug, tag, len(test_cmd), image_no_registry,
-            bool(github_pat), url,
+            bool(dockerhub_user and dockerhub_pass), url,
         )
 
         headers = {}
@@ -220,10 +248,12 @@ class JenkinsService:
                     "REPO": f"laurel-applications/{job}",
                     "IMAGE": image_no_registry,
                     "TEST_CMD": test_cmd,
-                    # PasswordParameter en el job: Jenkins lo enmascara
-                    # en el log del build. Viaja en el body del POST
+                    # PasswordParameters en el job: Jenkins los enmascara
+                    # en el log del build. Viajan en el body del POST
                     # (form-encoded), NO en la URL.
                     "GITHUB_PAT": github_pat or "placeholder",
+                    "DOCKERHUB_USER": dockerhub_user or "placeholder",
+                    "DOCKERHUB_PASSWORD": dockerhub_pass or "placeholder",
                 },
                 headers=headers,
                 timeout=JENKINS_TIMEOUT,
@@ -340,14 +370,15 @@ class JenkinsService:
         # XML de la config. Pipeline real de 3 stages con set -e:
         # 0. git clone (con GITHUB_PAT si llega en el trigger).
         # 1. unit tests (eval $TEST_CMD) -> falla, corta antes del build.
-        # 2+3. kaniko build + push a ghcr.io (atomico, sin docker daemon).
+        # 2+3. kaniko build + push a docker.io (atomico, sin docker daemon).
         # El `IMAGE` parametro es `owner/repo` sin registry/tag; el job
-        # agrega `ghcr.io/` y `:${TAG}`. `GITHUB_PAT` es un
-        # PasswordParameter auto-masked en logs.
+        # agrega `docker.io/` y `:${TAG}`. `DOCKERHUB_USER` /
+        # `DOCKERHUB_PASSWORD` y `GITHUB_PAT` son PasswordParameters
+        # auto-masked en logs.
         xml = (
             "<?xml version='1.0' encoding='UTF-8'?>\n"
             "<project>\n"
-            f"  <description>Job para {job}. Pipeline CI/CD real: clone -> tests -> kaniko build+push a GHCR. "
+            f"  <description>Job para {job}. Pipeline CI/CD real: clone -> tests -> kaniko build+push a Docker Hub. "
             "Creado por AppsService.create.</description>\n"
             "  <keepDependencies>false</keepDependencies>\n"
             "  <properties>\n"
@@ -358,7 +389,9 @@ class JenkinsService:
             f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub (owner/name)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_no_registry}</defaultValue><description>imagen destino SIN registry ni tag (e.g. owner/repo)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>TEST_CMD</name><defaultValue>{test_cmd}</defaultValue><description>comando a correr en STAGE 1 (unit tests)</description></hudson.model.StringParameterDefinition>\n"
-            "        <hudson.model.PasswordParameterDefinition><name>GITHUB_PAT</name><defaultValue>placeholder</defaultValue><description>GitHub PAT (repo + write:packages). Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
+            "        <hudson.model.PasswordParameterDefinition><name>GITHUB_PAT</name><defaultValue>placeholder</defaultValue><description>GitHub PAT para git clone de repos privados. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
+            "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_USER</name><defaultValue>placeholder</defaultValue><description>User de Docker Hub (namespace del repo). Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
+            "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_PASSWORD</name><defaultValue>placeholder</defaultValue><description>Password/token de Docker Hub para push a docker.io. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "      </parameterDefinitions>\n"
             "    </hudson.model.ParametersDefinitionProperty>\n"
             "    <hudson.model.BuildAuthorizationTokenProperty>\n"
@@ -396,20 +429,20 @@ class JenkinsService:
             "echo &quot;TESTS OK&quot;\n"
             "echo &quot;=========================================&quot;\n"
             "echo &quot;STAGE 2/3 + 3/3: Build &amp; push image (kaniko)&quot;\n"
-            "echo &quot;Destination: ghcr.io/${IMAGE}:${TAG}&quot;\n"
+            "echo &quot;Destination: docker.io/${IMAGE}:${TAG}&quot;\n"
             "echo &quot;=========================================&quot;\n"
             "export DOCKER_CONFIG=/workspace/.docker\n"
             "mkdir -p &quot;$DOCKER_CONFIG&quot;\n"
-            "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
-            "  AUTH=$(printf &quot;x-access-token:%s&quot; &quot;${GITHUB_PAT}&quot; | base64 -w 0)\n"
-            "  printf '{&quot;auths&quot;:{&quot;ghcr.io&quot;:{&quot;auth&quot;:&quot;%s&quot;}}}\n' &quot;$AUTH&quot; &gt; &quot;$DOCKER_CONFIG/config.json&quot;\n"
+            "if [ -n &quot;${DOCKERHUB_USER}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_USER}&quot; != &quot;placeholder&quot; ] &amp;&amp; [ -n &quot;${DOCKERHUB_PASSWORD}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_PASSWORD}&quot; != &quot;placeholder&quot; ]; then\n"
+            "  AUTH=$(printf &quot;%s:%s&quot; &quot;${DOCKERHUB_USER}&quot; &quot;${DOCKERHUB_PASSWORD}&quot; | base64 -w 0)\n"
+            "  printf '{&quot;auths&quot;:{&quot;docker.io&quot;:{&quot;auth&quot;:&quot;%s&quot;},&quot;https://index.docker.io/v1/&quot;:{&quot;auth&quot;:&quot;%s&quot;}}}\n' &quot;$AUTH&quot; &quot;$AUTH&quot; &gt; &quot;$DOCKER_CONFIG/config.json&quot;\n"
             "fi\n"
             "/usr/local/kaniko/executor \\\n"
             "  --context=/workspace \\\n"
             "  --dockerfile=Dockerfile \\\n"
-            "  --destination=&quot;ghcr.io/${IMAGE}:${TAG}&quot; \\\n"
+            "  --destination=&quot;docker.io/${IMAGE}:${TAG}&quot; \\\n"
             "  --cache=true \\\n"
-            "  --cache-repo=&quot;ghcr.io/laurel-applications/kaniko-cache&quot; \\\n"
+            "  --cache-repo=&quot;docker.io/${DOCKERHUB_USER}/kaniko-cache&quot; \\\n"
             "  --snapshot-mode=time\n"
             "echo &quot;BUILD+PUSH OK&quot;\n"
             "echo &quot;PIPELINE COMPLETE&quot;\n"

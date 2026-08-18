@@ -36,21 +36,21 @@ def ws(client, auth):
 
 class TestAppProvisionEvents:
     def test_create_app_with_workspace_records_events_and_ok(self, client, auth, ws):
-        # Sin PATs (TestConfig los vacia): github no pedido -> error, GHCR ok
-        # por defecto, namespace K8s ok (no-op en tests: cluster mocked),
-        # Jenkins job ok (create_job mockeado en este test suite).
+        # Sin PATs (TestConfig los vacia): github no pedido -> error, Docker
+        # Hub create falla (sin creds) -> error, namespace K8s ok (no-op en
+        # tests: cluster mocked), Jenkins job ok (create_job mockeado).
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()
         assert app["workspace_id"] == ws["id"]
         assert app["status"] == "error"
         events = app["events"]
-        # 4 eventos: github_repo, ghcr_repo, k8s_namespace, jenkins_job.
+        # 4 eventos: github_repo, docker_repo, k8s_namespace, jenkins_job.
         assert len(events) == 4
         assert events[0]["event"] == "github_repo"
         assert events[0]["status"] == "error"
-        assert events[1]["event"] == "ghcr_repo"
-        assert events[1]["status"] == "ok"
+        assert events[1]["event"] == "docker_repo"
+        assert events[1]["status"] == "error"
         assert events[2]["event"] == "k8s_namespace"
         assert events[2]["status"] == "ok"
         assert events[3]["event"] == "jenkins_job"
@@ -62,7 +62,7 @@ class TestAppProvisionEvents:
             "name": "Manual",
             "workspace_id": ws["id"],
             "github_repo_url": "https://github.com/laurel-applications/laurel_manual",
-            "docker_image_base": "ghcr.io/laurel-applications/laurel_manual",
+            "docker_image_base": "docker.io/aflobaton/laurel_manual",
         }, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()
@@ -70,7 +70,7 @@ class TestAppProvisionEvents:
         statuses = {e["event"]: e["status"] for e in app["events"]}
         assert statuses == {
             "github_repo": "ok",
-            "ghcr_repo": "ok",
+            "docker_repo": "ok",
             "k8s_namespace": "ok",
             "jenkins_job": "ok",
         }
