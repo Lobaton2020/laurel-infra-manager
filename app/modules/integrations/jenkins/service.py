@@ -415,8 +415,12 @@ class JenkinsService:
             "echo &quot;STAGE 0/3: Clone repo&quot;\n"
             "echo &quot;REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "rm -rf /workspace/* /workspace/.git /workspace/.[!.]* 2&gt;/dev/null || true\n"
-            "cd /workspace\n"
+            # Usamos $WORKSPACE (env var que Jenkins setea al workspace
+            # del job) en vez de /workspace hardcoded: asi funciona tanto
+            # en el cluster (workspace root por defecto) como en el
+            # Jenkins local (cuyo workspace base es distinto).
+            "rm -rf ${WORKSPACE}/* ${WORKSPACE}/.git ${WORKSPACE}/.[!.]* 2&gt;/dev/null || true\n"
+            "cd ${WORKSPACE}\n"
             "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
             "  git clone &quot;https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git&quot; .\n"
             "else\n"
@@ -427,13 +431,15 @@ class JenkinsService:
             "  echo &quot;ERROR: el repo ${REPO} esta vacio. Haz un push inicial a master antes de disparar el build.&quot; &gt;&amp;2\n"
             "  exit 2\n"
             "fi\n"
-            # Tag si existe; si no, master con WARN.
+            # Tag si existe; si no, HEAD (la default branch que ya clono
+            # git clone). Usamos HEAD en vez de 'master' hardcoded para
+            # soportar repos con default branch distinto (main, develop, etc).
             "if [ -n &quot;${TAG}&quot; ] &amp;&amp; git rev-parse --verify &quot;refs/tags/${TAG}&quot; &gt;/dev/null 2&gt;&amp;1; then\n"
             "  echo &quot;Checkout tag ${TAG}&quot;\n"
             "  git checkout -q &quot;${TAG}&quot;\n"
             "else\n"
-            "  echo &quot;WARN: tag ${TAG} no existe en el repo; usando master&quot;\n"
-            "  git checkout -q master\n"
+            "  echo &quot;WARN: tag ${TAG} no existe en el repo; usando HEAD (default branch)&quot;\n"
+            "  git checkout -q HEAD\n"
             "fi\n"
             "ls -la\n"
             "echo &quot;=========================================&quot;\n"
@@ -448,7 +454,7 @@ class JenkinsService:
             "echo &quot;STAGE 2/3 + 3/3: Build &amp; push image (kaniko)&quot;\n"
             "echo &quot;Destination: docker.io/${IMAGE}:${TAG}&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "export DOCKER_CONFIG=/workspace/.docker\n"
+            "export DOCKER_CONFIG=${WORKSPACE}/.docker\n"
             "mkdir -p &quot;$DOCKER_CONFIG&quot;\n"
             "if [ -n &quot;${DOCKERHUB_USER}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_USER}&quot; != &quot;placeholder&quot; ] &amp;&amp; [ -n &quot;${DOCKERHUB_PASSWORD}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_PASSWORD}&quot; != &quot;placeholder&quot; ]; then\n"
             "  AUTH=$(printf &quot;%s:%s&quot; &quot;${DOCKERHUB_USER}&quot; &quot;${DOCKERHUB_PASSWORD}&quot; | base64 -w 0)\n"
@@ -465,9 +471,9 @@ class JenkinsService:
             "  echo &quot;ERROR: kaniko no instalado en /usr/local/kaniko/&quot; &gt;&amp;2\n"
             "  exit 3\n"
             "fi\n"
-            "mkdir -p /workspace/.kaniko\n"
+            "mkdir -p ${WORKSPACE}/.kaniko\n"
             "&quot;${KANIKO_BIN}&quot; \\\n"
-            "  --context=/workspace \\\n"
+            "  --context=${WORKSPACE} \\\n"
             "  --dockerfile=Dockerfile \\\n"
             "  --destination=&quot;docker.io/${IMAGE}:${TAG}&quot; \\\n"
             "  --cache=true \\\n"

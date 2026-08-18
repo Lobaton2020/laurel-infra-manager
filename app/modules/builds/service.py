@@ -52,7 +52,7 @@ class BuildsService:
                 f"Build {build_id} no encontrado para la app {app_id}",
                 status_code=404,
             )
-        if poll and build.status not in _TERMINAL_STATUSES and build.jenkins_number:
+        if poll and build.status not in _TERMINAL_STATUSES and build.jenkins_url:
             BuildsService._poll_one(build)
         return build
 

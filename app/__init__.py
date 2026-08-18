@@ -85,7 +85,7 @@ def create_app(config_class=Config) -> Flask:
     from app.modules.domain_pool import bp as domain_pool_bp
     from app.modules.scoops import bp as scoops_bp
     from app.modules.system import bp as system_bp
-    from app.modules.webhooks import bp as webhooks_bp
+    from app.modules.webhooks import bp as webhooks_bp, dev_bp as webhooks_dev_bp
 
     # CORS restringido a los origins del front; mandamos Bearer en header
     # (no usamos cookies), por eso no hace falta supports_credentials=True.
@@ -94,7 +94,7 @@ def create_app(config_class=Config) -> Flask:
 
     app.before_request(authenticate_request)
 
-    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, workspaces_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp, builds_bp):
+    for blueprint in (health_bp, auth_bp, audits_bp, cluster_bp, configurator_bp, configstore_bp, apps_bp, workspaces_bp, domains_bp, domain_pool_bp, scoops_bp, system_bp, webhooks_bp, webhooks_dev_bp, builds_bp):
         app.register_blueprint(blueprint)
 
     register_error_handlers(app)
