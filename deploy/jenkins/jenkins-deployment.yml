@@ -14,32 +14,39 @@ spec:
       labels:
         app: jenkins
     spec:
+      # Jenkins corre como uid 1000 dentro del contenedor y necesita
+      # poder escribir en el volumen. Si el PV ya esta creado con otro
+      # owner, el initContainer de fix-permissions lo corrige.
+      securityContext:
+        fsGroup: 1000
       initContainers:
         - name: fix-permissions
-          image: busybox:latest
+          # Tag pinneado: `latest` rompe con frecuencia.
+          image: busybox:1.36
           command:
             - sh
             - -c
             - |
-              echo "🔧 Arreglando permisos..."
+              echo "Arreglando permisos del volumen..."
               mkdir -p /var/jenkins_home
               chown -R 1000:1000 /var/jenkins_home
               chmod -R 755 /var/jenkins_home
-              echo "✅ Permisos arreglados"
+              echo "Permisos OK"
           securityContext:
             runAsUser: 0
-            runAsNonRoot: false
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
       containers:
         - name: jenkins
-          image: jenkins/jenkins:lts-jdk17
+          image: jenkins/jenkins:2.516.3-lts-jdk21
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
             runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
           ports:
             - containerPort: 8080
               name: http
@@ -49,7 +56,18 @@ spec:
               protocol: TCP
           env:
             - name: JAVA_OPTS
-              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=true -Xmx512m -Xms256m"
+              # CSRF deshabilitado para que el backend pueda hacer POST sin crumb.
+              # El auth real va por build token en query param (estrategia
+              # documentada por Jenkins: "Trigger builds remotely").
+              # Heap: 1g es lo minimo sano con varios jobs + plugins;
+              # lo bajo a 768m solo si el nodo se queda corto.
+              value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=true -Xmx1024m -Xms512m"
+            - name: JENKINS_OPTS
+              # Sin auth global: el backend hace requests anonimas para
+              # job_exists / get_build_status; el trigger usa build token.
+              # Si en algun momento necesitamos agregar SSO, lo cambiamos
+              # a un init.groovy que cree el realm + estrategia con permisos.
+              value: "--httpPort=8080"
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
@@ -57,25 +75,27 @@ spec:
               mountPath: /var/jenkins_home/init.groovy.d
           readinessProbe:
             httpGet:
-              path: /login
+              # /api/json responde 200 cuando el server esta listo
+              # (sin redirect a /login que confunde al probe).
+              path: /api/json
               port: 8080
-            initialDelaySeconds: 90
+            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet:
-              path: /login
+              path: /api/json
               port: 8080
-            initialDelaySeconds: 150
+            initialDelaySeconds: 120
             periodSeconds: 30
             failureThreshold: 5
           resources:
             requests:
-              cpu: "200m"
-              memory: "512Mi"
+              cpu: "300m"
+              memory: "768Mi"
             limits:
-              cpu: "1000m"
-              memory: "1.5Gi"
+              cpu: "1500m"
+              memory: "2Gi"
       volumes:
         - name: jenkins-home
           persistentVolumeClaim:
@@ -84,26 +104,82 @@ spec:
           configMap:
             name: jenkins-init-scripts
 ---
+# Scripts Groovy que corren en el primer arranque (y en cada reinicio
+# si el script es idempotente, que es lo que asumimos aca).
+# Jenkins los carga desde $JENKINS_HOME/init.groovy.d/*.groovy.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: jenkins-init-scripts
 data:
-  disable-csrf.groovy: |
+  # 1) Deshabilita CSRF y deja la auth como UNSECURED.
+  #    El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
+  #    get_build_status) y POSTs con ?token=<build_token> a
+  #    /job/<job>/buildWithParameters. Ninguno requiere login.
+  00-security.groovy: |
     import jenkins.model.Jenkins
-    import hudson.security.csrf.GlobalCrumbIssuerConfiguration
+    import hudson.security.AuthorizationStrategy
+
+    def instance = Jenkins.getInstance()
+    instance.setAuthorizationStrategy(AuthorizationStrategy.UNSECURED)
+    instance.setSecurityRealm(new hudson.security.HudsonPrivateSecurityRealm(false))
+
+    if (instance.getCrumbIssuer() != null) {
+        instance.setCrumbIssuer(null)
+        println "[init] CSRF deshabilitado"
+    }
+    instance.save()
+    println "[init] Security: UNSECURED + crumb OFF"
+
+  # 2) Crea el job `laurel_demo` para dev/smoke tests apenas Jenkins
+  #    levanta. El backend NO crea jobs en el flujo real: cuando el
+  #    operador da de alta una app, debe crear el job `laurel_<slug>`
+  #    en Jenkins con los 4 parametros y un build token, y guardar
+  #    ese token en el secreto k8s `laurel-integrations` (key
+  #    `jenkins-token`). Este init script solo automatiza el caso
+  #    demo para que el entorno de pruebas se levante solo.
+  10-bootstrap-jobs.groovy: |
+    import jenkins.model.Jenkins
+    import hudson.model.FreeStyleProject
+    import hudson.model.ParametersDefinitionProperty
+    import hudson.model.StringParameterDefinition
+    import hudson.tasks.Shell
+    import hudson.model.BuildAuthorizationTokenProperty
 
     def jenkins = Jenkins.getInstance()
-    def crumbIssuer = jenkins.getCrumbIssuer()
+    def jobName = "laurel_demo"
+    def token = "laurel-test-token-2026"
 
-    if (crumbIssuer != null) {
-        println "Deshabilitando CSRF..."
-        jenkins.setCrumbIssuer(null)
-        jenkins.save()
-        println "✅ CSRF DESHABILITADO"
-    } else {
-        println "ℹ️ CSRF ya estaba deshabilitado"
+    if (jenkins.getItem(jobName) != null) {
+        println "[init] job ${jobName} ya existe, skip"
+        return
     }
+
+    def job = jenkins.createProject(FreeStyleProject, jobName)
+    job.description = "Demo build job. Solo para smoke test del flujo webhook -> Jenkins."
+
+    def params = new ParametersDefinitionProperty([
+        new StringParameterDefinition("SLUG", "demo", "slug de la app"),
+        new StringParameterDefinition("TAG",  "0.0.1", "tag/version a buildear"),
+        new StringParameterDefinition("REPO", "laurel-applications/laurel_demo", "repo GitHub"),
+        new StringParameterDefinition("IMAGE", "aflobaton/laurel_demo:0.0.1", "imagen Docker destino"),
+    ])
+    job.addProperty(params)
+
+    def shell = new Shell(
+        'echo "== laurel build =="\n' +
+        'echo "SLUG=${SLUG} TAG=${TAG} REPO=${REPO} IMAGE=${IMAGE}"\n' +
+        'echo "step 1: fake build (sleep 8s)"\n' +
+        'sleep 8\n' +
+        'echo "BUILD DONE"\n' +
+        'exit 0'
+    )
+    job.getBuildersList().add(shell)
+
+    // Build token: API Java estable, sin tocar XML a mano.
+    job.addProperty(new BuildAuthorizationTokenProperty(token))
+    job.save()
+    println "[init] job ${jobName} creado con build token '${token}'"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -115,4 +191,4 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: 20Gi
