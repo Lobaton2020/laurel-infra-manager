@@ -1,6 +1,9 @@
 """Controller HTTP para Application CRUD."""
-from flask import Blueprint, jsonify, request
+import re
 
+from flask import Blueprint, current_app, jsonify, request
+
+from app.core.errors import AppError
 from app.core.http import pagination
 from app.modules.apps.model import AppDeletionLog, AppEvent
 from app.modules.apps.schema import (
@@ -10,6 +13,7 @@ from app.modules.apps.schema import (
     ApplicationUpdate,
 )
 from app.modules.apps.service import AppsService
+from app.modules.integrations.docker import version_bump
 
 bp = Blueprint("apps", __name__, url_prefix="/api/apps")
 
@@ -182,3 +186,53 @@ def delete_app(app_id: int):
     """
     app = AppsService.delete(app_id)
     return jsonify({"deleted": app.id, "slug": app.slug})
+
+
+_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$")
+
+
+@bp.get("/<string:slug>/next_version")
+def next_version_for_slug(slug: str):
+    """Próxima versión semver que el pipeline asignará al siguiente build.
+
+    Source-of-truth: tags existentes en Docker Hub para
+    `docker.io/{DOCKERHUB_USER}/laurel_<slug>`. Independiente de que el
+    tag git se cree o no (útil cuando el PAT es read-only).
+    ---
+    tags: [Apps]
+    parameters:
+      - {name: slug, in: path, required: true, type: string, description: "slug de la app"}
+    responses:
+      200: {description: next_version calculada}
+      400: {description: slug invalido}
+      503: {description: DOCKERHUB_USER/PASSWORD no configurados}
+      502: {description: Docker Hub rechazó login o tags fetch}
+    """
+    if not _SLUG_RE.match(slug):
+        raise AppError(
+            "slug invalido: debe coincidir con [a-z0-9][a-z0-9_-]{0,61} (max 63 chars, sin _/- al inicio/fin)",
+            status_code=400,
+            reason="invalid_slug",
+        )
+    user = (current_app.config.get("DOCKERHUB_USER") or "").strip()
+    password = current_app.config.get("DOCKERHUB_PASSWORD") or ""
+    if not user or not password:
+        raise AppError(
+            "Docker Hub credentials not configured",
+            status_code=503,
+            reason="dockerhub_unconfigured",
+        )
+    try:
+        nxt = version_bump.next_version(user, password, repo=f"laurel_{slug}")
+    except version_bump.DockerHubError as exc:
+        raise AppError(
+            f"docker hub error: {exc}",
+            status_code=502,
+            reason="dockerhub_error",
+        )
+    return jsonify({
+        "slug": slug,
+        "namespace": user,
+        "image": f"{user}/laurel_{slug}",
+        "next_version": nxt,
+    })
