@@ -4,7 +4,17 @@ metadata:
   name: jenkins
   labels:
     app: jenkins
+  # Politica: este manifiesto NO contiene credenciales (API tokens, passwords,
+  # client secrets, csrf tokens) en texto plano. Cualquier secreto que el pod
+  # necesite (build token, registry password, etc) se inyecta desde un
+  # Kubernetes Secret referenciado via env.valueFrom.secretKeyRef o
+  # `kubectl set env --from=secret/...`.
+  annotations:
+    laurel.andreslobaton.top/no-credentials-in-manifest: "true"
 spec:
+  # replicas: 1 es obligatorio: el PVC jenkins-home es ReadWriteOnce y un
+  # segundo pod no podria montar el mismo PV. Si en algun momento se
+  # necesita HA, migrar a Longhorn RWX y subir replicas.
   replicas: 1
   selector:
     matchLabels:
@@ -14,6 +24,9 @@ spec:
       labels:
         app: jenkins
     spec:
+      # Grace period generoso: kaniko puede estar empujando layers cuando
+      # llega un SIGTERM, y queremos que termine la subida antes de morir.
+      terminationGracePeriodSeconds: 60
       # Jenkins corre como uid 1000 dentro del contenedor y necesita
       # poder escribir en el volumen. Si el PV ya esta creado con otro
       # owner, el initContainer de fix-permissions lo corrige.
@@ -38,12 +51,16 @@ spec:
             - name: jenkins-home
               mountPath: /var/jenkins_home
         - name: install-kaniko
-          # Kaniko ejecuta `docker build` sin daemon. Copiamos solo el
-          # binario `/kaniko/executor` a un emptyDir compartido; el
-          # container de Jenkins lo lee desde /usr/local/kaniko/executor.
-          # Tag pinneado para reproducibilidad (`:debug` trae el binario
-          # en /kaniko/executor, a diferencia de `:latest` que requiere
-          # extraerlo del wars).
+          # Kaniko ejecuta `docker build` sin daemon. Copiamos el binario
+          # `/kaniko/executor` del image `:debug` (que lo trae ya extraido,
+          # a diferencia de `:latest` que requiere sacarlo de wars) a un
+          # emptyDir compartido con jenkins. Lo copiamos con DOS nombres
+          # para que sirva tanto a jobs que llaman `/usr/local/kaniko/kaniko`
+          # como a los existentes (`/usr/local/kaniko/executor`).
+          # Tambien preparamos el dir de staging que el binario usa
+          # internamente (hardcoded a `/kaniko`); jenkins lo monta
+          # desde el mismo emptyDir en `/kaniko` -> queda escribible por
+          # el uid 1000.
           image: gcr.io/kaniko-project/executor:v1.23.2-debug
           command:
             - sh
@@ -52,14 +69,19 @@ spec:
               set -e
               echo "Instalando kaniko executor..."
               cp /kaniko/executor /shared-kaniko/kaniko
-              chmod 0755 /shared-kaniko/kaniko
-              /shared-kaniko/kaniko --version || true
-              echo "Kaniko instalado"
+              cp /kaniko/executor /shared-kaniko/executor
+              chmod 0755 /shared-kaniko/kaniko /shared-kaniko/executor
+              mkdir -p /shared-kaniko/work
+              chmod 1777 /shared-kaniko/work
+              /shared-kaniko/kaniko --help >/dev/null || true
+              echo "Kaniko instalado (bin en /shared-kaniko/{kaniko,executor})"
           securityContext:
             runAsUser: 0
           volumeMounts:
             - name: kaniko-bin
               mountPath: /shared-kaniko
+            - name: kaniko-work
+              mountPath: /shared-kaniko/work
       containers:
         - name: jenkins
           image: jenkins/jenkins:2.516.3-lts-jdk21
@@ -79,9 +101,13 @@ spec:
               protocol: TCP
           env:
             - name: JAVA_OPTS
-              # CSRF deshabilitado para que el backend pueda hacer POST sin crumb.
-              # El auth real va por build token en query param (estrategia
-              # documentada por Jenkins: "Trigger builds remotely").
+              # Importante: -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=true
+              # es un FLAG boolean (no un token). El backend dispara builds
+              # con ?token=<build_token> en query string, que es la unica
+              # auth que valida Jenkins en este modo (ver "Trigger builds
+              # remotely" en la doc oficial). NO contiene credenciales aqui:
+              # los build tokens viven en Secretes de k8s y el backend los
+              # lee de ahi al armar el POST.
               # Heap: 1g es lo minimo sano con varios jobs + plugins;
               # lo bajo a 768m solo si el nodo se queda corto.
               value: "-Djenkins.install.runSetupWizard=false -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=true -Xmx1024m -Xms512m"
@@ -98,33 +124,48 @@ spec:
               mountPath: /var/jenkins_home/init.groovy.d
             - name: kaniko-bin
               mountPath: /usr/local/kaniko
+            # kaniko lee/escribe su staging dir en /kaniko (hardcoded en
+            # el binario v1.23.2; --kaniko-dir no lo redirige). El init
+            # container deja este dir world-writable.
+            - name: kaniko-work
+              mountPath: /kaniko
             - name: workspace
               mountPath: /workspace
             - name: kaniko-cache
               mountPath: /kaniko-cache
+          # startupProbe evita que readiness/liveness maten el pod durante
+          # el primer boot de Jenkins (descarga plugins, descomprime war,
+          # puede tardar 2-3 min en clusters lentos).
+          startupProbe:
+            httpGet:
+              path: /api/json
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 36  # 6 min totales de gracia
           readinessProbe:
             httpGet:
               # /api/json responde 200 cuando el server esta listo
               # (sin redirect a /login que confunde al probe).
               path: /api/json
               port: 8080
-            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 12
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /api/json
               port: 8080
-            initialDelaySeconds: 120
             periodSeconds: 30
             failureThreshold: 5
           resources:
+            # Produccion: jenkins con varios jobs + kaniko build+push
+            # simultaneos + la JVM cargando plugins se acerca a 1.5Gi
+            # facil. Ajustar si el cluster tiene menos memoria.
             requests:
-              cpu: "300m"
-              memory: "768Mi"
+              cpu: "500m"
+              memory: "1Gi"
             limits:
-              cpu: "1500m"
-              memory: "2Gi"
+              cpu: "2000m"
+              memory: "3Gi"
       volumes:
         - name: jenkins-home
           persistentVolumeClaim:
@@ -133,6 +174,11 @@ spec:
           configMap:
             name: jenkins-init-scripts
         - name: kaniko-bin
+          emptyDir: {}
+        - name: kaniko-work
+          # emptyDir dedicado al staging dir de kaniko (/kaniko). Si lo
+          # montamos sobre el mismo emptyDir que kaniko-bin se contamina
+          # el dir de binarios. Mejor separado.
           emptyDir: {}
         - name: workspace
           # Donde el job clona el repo. emptyDir se pierde cuando el pod
@@ -147,15 +193,20 @@ spec:
 # Scripts Groovy que corren en el primer arranque (y en cada reinicio
 # si el script es idempotente, que es lo que asumimos aca).
 # Jenkins los carga desde $JENKINS_HOME/init.groovy.d/*.groovy.
+#
+# Los jobs reales (`laurel_<slug>`) los crea el backend al dar de alta
+# una app en AppsService.create. Este ConfigMap solo deja Jenkins con
+# la configuracion de seguridad minima necesaria para que el backend
+# pueda disparar builds de forma anonima con build token.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: jenkins-init-scripts
 data:
-  # 1) Deshabilita CSRF y deja la auth como UNSECURED.
-  #    El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
-  #    get_build_status) y POSTs con ?token=<build_token> a
-  #    /job/<job>/buildWithParameters. Ninguno requiere login.
+  # Deshabilita CSRF y deja la auth como UNSECURED.
+  # El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
+  # get_build_status) y POSTs con ?token=<build_token> a
+  # /job/<job>/buildWithParameters. Ninguno requiere login.
   00-security.groovy: |
     import jenkins.model.Jenkins
     import hudson.security.AuthorizationStrategy
@@ -170,124 +221,6 @@ data:
     }
     instance.save()
     println "[init] Security: UNSECURED + crumb OFF"
-
-  # 2) Crea el job `laurel_demo` para dev/smoke tests apenas Jenkins
-  #    levanta. El backend NO crea jobs en el flujo real: cuando el
-  #    operador da de alta una app, debe crear el job `laurel_<slug>`
-  #    en Jenkins con los parametros y un build token, y guardar ese
-  #    token en el secreto k8s `laurel-integrations` (key `jenkins-token`).
-  #    Este init script solo automatiza el caso demo.
-  #
-  #    El job corre un pipeline CI/CD real de 3 stages con `set -e`:
-  #      0. git clone del repo (con GITHUB_PAT para repos privados).
-  #      1. Unit tests (`eval "$TEST_CMD"`)  -> si falla, no se buildea.
-  #      2. Build image con kaniko (`/usr/local/kaniko/executor`).
-  #      3. Push image a Docker Hub (kaniko lo hace en el mismo paso).
-  #    Kaniko corre como binario copiado por el init container
-  #    `install-kaniko` (no necesita docker daemon en el pod).
-  10-bootstrap-jobs.groovy: |
-    import jenkins.model.Jenkins
-    import hudson.model.FreeStyleProject
-    import hudson.model.ParametersDefinitionProperty
-    import hudson.model.StringParameterDefinition
-    import hudson.model.PasswordParameterDefinition
-    import hudson.tasks.Shell
-    import hudson.model.BuildAuthorizationTokenProperty
-
-    def jenkins = Jenkins.getInstance()
-    def jobName = "laurel_demo"
-    def token = "laurel-test-token-2026"
-
-    // Si el job ya existe de un deploy previo, lo borramos y recreamos
-    // para que tome el pipeline nuevo. Init scripts corren en cada
-    // reinicio del pod, pero la definicion del job queda en el PV y
-    // no se vuelve a aplicar sola.
-    def existing = jenkins.getItem(jobName)
-    if (existing != null) {
-        existing.delete()
-        println "[init] job ${jobName} eliminado para recrear con pipeline real"
-    }
-
-    def job = jenkins.createProject(FreeStyleProject, jobName)
-    job.description = "Demo build job. Pipeline CI/CD real: clone -> tests -> kaniko build+push a Docker Hub."
-
-    def params = new ParametersDefinitionProperty([
-        new StringParameterDefinition("SLUG", "demo", "slug de la app"),
-        new StringParameterDefinition("TAG",  "0.0.1", "tag/version a buildear"),
-        new StringParameterDefinition("REPO", "laurel-applications/laurel_demo", "repo GitHub (owner/name)"),
-        new StringParameterDefinition("IMAGE", "aflobaton/laurel_demo", "imagen destino SIN registry ni tag (e.g. owner/repo)"),
-        new StringParameterDefinition(
-            "TEST_CMD", "echo '[demo] no tests configured - placeholder OK'",
-            "comando a correr en STAGE 1 (unit tests). Default placeholder; " +
-            "para apps reales pasar el comando real (ej 'pytest tests/', 'npm test')."
-        ),
-        new PasswordParameterDefinition(
-            "GITHUB_PAT", "placeholder",
-            "GitHub PAT para git clone de repos privados. " +
-            "PasswordParameter es auto-masked en el log de Jenkins."
-        ),
-        new PasswordParameterDefinition(
-            "DOCKERHUB_USER", "placeholder",
-            "User de Docker Hub (namespace del repo). Auto-masked en logs."
-        ),
-        new PasswordParameterDefinition(
-            "DOCKERHUB_PASSWORD", "placeholder",
-            "Password/token de Docker Hub para push a docker.io. Auto-masked en logs."
-        ),
-    ])
-    job.addProperty(params)
-
-    // Pipeline real: clone -> tests -> kaniko build+push.
-    // `set -e` corta en cuanto algo falla. kaniko hace build+push
-    // atomico contra docker.io (el IMAGE param viene sin registry).
-    def shell = new Shell(
-        'set -e\n' +
-        'echo "========================================="\n' +
-        'echo "STAGE 0/3: Clone repo"\n' +
-        'echo "REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}"\n' +
-        'echo "========================================="\n' +
-        'rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true\n' +
-        'cd /workspace\n' +
-        'if [ -n "${GITHUB_PAT}" ] && [ "${GITHUB_PAT}" != "placeholder" ]; then\n' +
-        '  git clone "https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git" .\n' +
-        'else\n' +
-        '  git clone "https://github.com/${REPO}.git" .\n' +
-        'fi\n' +
-        'git checkout -q "${TAG}" 2>/dev/null || git checkout -q master\n' +
-        'ls -la\n' +
-        'echo "========================================="\n' +
-        'echo "STAGE 1/3: Unit tests"\n' +
-        'echo "TEST_CMD: ${TEST_CMD}"\n' +
-        'echo "========================================="\n' +
-        'eval "${TEST_CMD}"\n' +
-        'echo "TESTS OK"\n' +
-        'echo "========================================="\n' +
-        'echo "STAGE 2/3 + 3/3: Build & push image (kaniko)"\n' +
-        'echo "Destination: docker.io/${IMAGE}:${TAG}"\n' +
-        'echo "========================================="\n' +
-        'export DOCKER_CONFIG=/workspace/.docker\n' +
-        'mkdir -p "$DOCKER_CONFIG"\n' +
-        'if [ -n "${DOCKERHUB_USER}" ] && [ "${DOCKERHUB_USER}" != "placeholder" ] && [ -n "${DOCKERHUB_PASSWORD}" ] && [ "${DOCKERHUB_PASSWORD}" != "placeholder" ]; then\n' +
-        '  AUTH=$(printf "%s:%s" "${DOCKERHUB_USER}" "${DOCKERHUB_PASSWORD}" | base64 -w 0)\n' +
-        '  printf \'{"auths":{"docker.io":{"auth":"%s"},"https://index.docker.io/v1/":{"auth":"%s"}}}\\n\' "$AUTH" "$AUTH" > "$DOCKER_CONFIG/config.json"\n' +
-        'fi\n' +
-        '/usr/local/kaniko/executor \\\n' +
-        '  --context=/workspace \\\n' +
-        '  --dockerfile=Dockerfile \\\n' +
-        '  --destination="docker.io/${IMAGE}:${TAG}" \\\n' +
-        '  --cache=true \\\n' +
-        '  --cache-repo="docker.io/${DOCKERHUB_USER}/kaniko-cache" \\\n' +
-        '  --snapshot-mode=time\n' +
-        'echo "BUILD+PUSH OK"\n' +
-        'echo "PIPELINE COMPLETE"\n' +
-        'exit 0\n'
-    )
-    job.getBuildersList().add(shell)
-
-    // Build token: API Java estable, sin tocar XML a mano.
-    job.addProperty(new BuildAuthorizationTokenProperty(token))
-    job.save()
-    println "[init] job ${jobName} creado con build token '${token}'"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
