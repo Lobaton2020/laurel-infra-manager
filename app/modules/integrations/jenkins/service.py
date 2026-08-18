@@ -1,5 +1,6 @@
 """Cliente REST para Jenkins (build triggers via build token, sin SDK)."""
 import logging
+import os
 import re
 import traceback
 from typing import Literal
@@ -275,13 +276,15 @@ class JenkinsService:
         )
 
         if resp.status_code in (200, 201):
-            # Jenkins responde 201 con un header `Location: /job/<job>/<n>/`
-            # del que extraemos el numero de build. Si no esta, devolvemos
-            # solo la URL del job y number=None.
-            number = _parse_build_number(location)
-            build_url = (
-                f"{base}/job/{job}/{number}" if number else f"{base}/job/{job}"
-            )
+            # Jenkins responde 201 con un header `Location` que apunta
+            # al build. El formato varia segun el estado:
+            #   - /job/<job>/<n>/          -> build ya tiene numero asignado
+            #   - /queue/item/<id>/         -> build encolado, numero pendiente
+            # Extraemos la URL canonica (lo que Jenkins considera su
+            # identificador oficial) y, si la URL es de queue, resolvemos
+            # el numero con un GET al queue. Asi nunca guardamos un
+            # `jenkins_number` que el polling despues no pueda usar.
+            build_url, number = _resolve_build_location(base, location, job)
             logger.info(
                 "jenkins.trigger_build OK slug=%s job=%s number=%s url=%s",
                 slug, job, number, build_url,
@@ -412,20 +415,34 @@ class JenkinsService:
             "echo &quot;STAGE 0/3: Clone repo&quot;\n"
             "echo &quot;REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "rm -rf /workspace/* /workspace/.[!.]* 2&gt;/dev/null || true\n"
+            "rm -rf /workspace/* /workspace/.git /workspace/.[!.]* 2&gt;/dev/null || true\n"
             "cd /workspace\n"
             "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
             "  git clone &quot;https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git&quot; .\n"
             "else\n"
             "  git clone &quot;https://github.com/${REPO}.git&quot; .\n"
             "fi\n"
-            "git checkout -q &quot;${TAG}&quot; 2&gt;/dev/null || git checkout -q master\n"
+            # Si el repo esta vacio (sin commits), falla con mensaje claro.
+            "if ! git rev-parse --verify HEAD &gt;/dev/null 2&gt;&amp;1; then\n"
+            "  echo &quot;ERROR: el repo ${REPO} esta vacio. Haz un push inicial a master antes de disparar el build.&quot; &gt;&amp;2\n"
+            "  exit 2\n"
+            "fi\n"
+            # Tag si existe; si no, master con WARN.
+            "if [ -n &quot;${TAG}&quot; ] &amp;&amp; git rev-parse --verify &quot;refs/tags/${TAG}&quot; &gt;/dev/null 2&gt;&amp;1; then\n"
+            "  echo &quot;Checkout tag ${TAG}&quot;\n"
+            "  git checkout -q &quot;${TAG}&quot;\n"
+            "else\n"
+            "  echo &quot;WARN: tag ${TAG} no existe en el repo; usando master&quot;\n"
+            "  git checkout -q master\n"
+            "fi\n"
             "ls -la\n"
             "echo &quot;=========================================&quot;\n"
             "echo &quot;STAGE 1/3: Unit tests&quot;\n"
             "echo &quot;TEST_CMD: ${TEST_CMD}&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "eval &quot;${TEST_CMD}&quot;\n"
+            "if [ -n &quot;${TEST_CMD}&quot; ]; then\n"
+            "  eval &quot;${TEST_CMD}&quot;\n"
+            "fi\n"
             "echo &quot;TESTS OK&quot;\n"
             "echo &quot;=========================================&quot;\n"
             "echo &quot;STAGE 2/3 + 3/3: Build &amp; push image (kaniko)&quot;\n"
@@ -437,7 +454,19 @@ class JenkinsService:
             "  AUTH=$(printf &quot;%s:%s&quot; &quot;${DOCKERHUB_USER}&quot; &quot;${DOCKERHUB_PASSWORD}&quot; | base64 -w 0)\n"
             "  printf '{&quot;auths&quot;:{&quot;docker.io&quot;:{&quot;auth&quot;:&quot;%s&quot;},&quot;https://index.docker.io/v1/&quot;:{&quot;auth&quot;:&quot;%s&quot;}}}\n' &quot;$AUTH&quot; &quot;$AUTH&quot; &gt; &quot;$DOCKER_CONFIG/config.json&quot;\n"
             "fi\n"
-            "/usr/local/kaniko/executor \\\n"
+            # Init container deja el binario en /usr/local/kaniko/kaniko
+            # (tambien como `executor` por compat). /kaniko (montado
+            # desde emptyDir `kaniko-work`) es el staging dir escribible.
+            "if [ -x /usr/local/kaniko/kaniko ]; then\n"
+            "  KANIKO_BIN=/usr/local/kaniko/kaniko\n"
+            "elif [ -x /usr/local/kaniko/executor ]; then\n"
+            "  KANIKO_BIN=/usr/local/kaniko/executor\n"
+            "else\n"
+            "  echo &quot;ERROR: kaniko no instalado en /usr/local/kaniko/&quot; &gt;&amp;2\n"
+            "  exit 3\n"
+            "fi\n"
+            "mkdir -p /workspace/.kaniko\n"
+            "&quot;${KANIKO_BIN}&quot; \\\n"
             "  --context=/workspace \\\n"
             "  --dockerfile=Dockerfile \\\n"
             "  --destination=&quot;docker.io/${IMAGE}:${TAG}&quot; \\\n"
@@ -479,10 +508,13 @@ class JenkinsService:
         if resp.status_code in (200, 201):
             logger.info("jenkins.create_job OK slug=%s job=%s", slug, job)
             return True
-        # 409 = ya existe: idempotente.
+        # 409 = ya existe: REFRESCAMOS el config del job existente
+        # (POST /job/<name>/config.xml). Esto es importante porque un
+        # job creado con una version vieja del codigo no se actualiza
+        # solo: al re-llamar create_job (p.ej. al recrear la app) el
+        # job queda con el pipeline nuevo y el build token actualizado.
         if resp.status_code == 409 or "already exists" in resp.text.lower():
-            logger.info("jenkins.create_job EXISTS slug=%s job=%s (409, skip)", slug, job)
-            return False
+            return JenkinsService._refresh_job_config(slug, job, xml, crumb)
         # 403 con crumb invalido: lo logueamos y reintentamos sin crumb una vez.
         if resp.status_code == 403 and crumb:
             logger.warning("jenkins.create_job CRUMB_RETRY slug=%s (403 con crumb)", slug)
@@ -496,8 +528,7 @@ class JenkinsService:
                 logger.info("jenkins.create_job OK_AFTER_RETRY slug=%s", slug)
                 return True
             if resp.status_code == 409 or "already exists" in resp.text.lower():
-                logger.info("jenkins.create_job EXISTS_AFTER_RETRY slug=%s", slug)
-                return False
+                return JenkinsService._refresh_job_config(slug, job, xml, crumb=None)
         logger.error(
             "jenkins.create_job REJECTED slug=%s status=%s body=%s",
             slug, resp.status_code, resp.text[:200],
@@ -506,6 +537,53 @@ class JenkinsService:
             f"Jenkins rechazo createItem: {resp.status_code} {resp.text[:200]}",
             status_code=502,
         )
+
+    @staticmethod
+    def _refresh_job_config(
+        slug: str, job: str, xml: str, crumb: str | None
+    ) -> bool:
+        """Actualiza el config de un job existente con el XML nuevo.
+
+        Llamado desde create_job cuando Jenkins responde 409 (job ya
+        existe). Hace POST /job/<job>/config.xml con el mismo XML que
+        usariamos para crearlo. Asi un job viejo se refresca al pipeline
+        nuevo + build token actualizado en una sola llamada, sin que el
+        operador tenga que borrarlo a mano.
+
+        Returns True si se actualizo, False si fallo (logueado).
+        """
+        _validate_slug(slug)
+        base = JenkinsService._base_url()
+        url = f"{base}/job/{job}/config.xml"
+        headers = {"Content-Type": "application/xml"}
+        if crumb:
+            headers["Jenkins-Crumb"] = crumb
+        logger.info(
+            "jenkins.refresh_job_config START slug=%s job=%s url=%s xml_len=%d",
+            slug, job, url, len(xml),
+        )
+        try:
+            resp = requests.post(
+                url, data=xml.encode("utf-8"), headers=headers,
+                timeout=JENKINS_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "jenkins.refresh_job_config CONN_ERROR slug=%s err=%s",
+                slug, exc,
+            )
+            return False
+        if resp.status_code in (200, 201, 204):
+            logger.info(
+                "jenkins.refresh_job_config OK slug=%s job=%s status=%s",
+                slug, job, resp.status_code,
+            )
+            return True
+        logger.warning(
+            "jenkins.refresh_job_config FAIL slug=%s status=%s body=%s",
+            slug, resp.status_code, resp.text[:200],
+        )
+        return False
 
     @staticmethod
     def delete_job(slug: str) -> bool:
@@ -560,8 +638,20 @@ class JenkinsService:
         return resp.status_code == 200
 
     @staticmethod
-    def get_build_status(slug: str, build_number: int) -> dict:
+    def get_build_status(
+        slug: str,
+        build_number: int | None = None,
+        *,
+        build_url: str | None = None,
+    ) -> dict:
         """Consulta el status actual de un build de Jenkins.
+
+        La forma recomendada es pasar `build_url` (la URL canonica que
+        Jenkins devolvio en el header `Location` del trigger). Esto
+        evita depender de un `build_number` que podria estar desincronizado
+        o ser None (build encolada). Si solo se pasa `build_number`, se
+        reconstruye la URL como `{base}/job/{PREFIX}{slug}/{n}` (modo
+        legacy, mantenido para compatibilidad).
 
         Returns: `{"status", "building", "result", "timestamp"}` mapeado
         a los valores del modelo AppBuild:
@@ -571,33 +661,44 @@ class JenkinsService:
         - 404/otro: lanza AppError
         """
         _validate_slug(slug)
-        base = JenkinsService._base_url()
-        url = f"{base}/job/{PREFIX}{slug}/{build_number}/api/json"
+        if build_url:
+            # Normalizo: el caller puede haber guardado con o sin /api/json.
+            url = build_url.rstrip("/")
+            if not url.endswith("/api/json"):
+                url = f"{url}/api/json"
+        elif build_number is not None:
+            base = JenkinsService._base_url()
+            url = f"{base}/job/{PREFIX}{slug}/{build_number}/api/json"
+        else:
+            raise AppError(
+                "get_build_status requiere build_url o build_number",
+                status_code=500,
+            )
         logger.info(
-            "jenkins.get_build_status START slug=%s number=%s url=%s",
-            slug, build_number, url,
+            "jenkins.get_build_status START slug=%s url=%s",
+            slug, url,
         )
         try:
             resp = requests.get(url, timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
             logger.error(
-                "jenkins.get_build_status CONN_ERROR slug=%s number=%s err=%s",
-                slug, build_number, exc,
+                "jenkins.get_build_status CONN_ERROR slug=%s err=%s",
+                slug, exc,
             )
             raise AppError("Jenkins timeout", status_code=504) from exc
         if resp.status_code == 404:
             logger.warning(
-                "jenkins.get_build_status NOT_FOUND slug=%s number=%s",
-                slug, build_number,
+                "jenkins.get_build_status NOT_FOUND slug=%s url=%s",
+                slug, url,
             )
             raise AppError(
-                f"Jenkins build {PREFIX}{slug}/{build_number} not found",
+                f"Jenkins build not found: {url}",
                 status_code=404,
             )
         if resp.status_code != 200:
             logger.error(
-                "jenkins.get_build_status ERROR slug=%s number=%s status=%s body=%s",
-                slug, build_number, resp.status_code, resp.text[:200],
+                "jenkins.get_build_status ERROR slug=%s status=%s body=%s",
+                slug, resp.status_code, resp.text[:200],
             )
             raise AppError(
                 f"Jenkins API error {resp.status_code}: {resp.text[:200]}",
@@ -610,31 +711,138 @@ class JenkinsService:
             status: BuildStatus = "running"
         else:
             status = _map_jenkins_result(result)
+        number = data.get("number")
         logger.info(
             "jenkins.get_build_status OK slug=%s number=%s status=%s building=%s result=%s",
-            slug, build_number, status, building, result,
+            slug, number, status, building, result,
         )
         return {
             "status": status,
             "building": building,
             "result": result,
             "timestamp": data.get("timestamp"),
+            "number": number,
         }
 
 
 def _parse_build_number(location_header: str | None) -> int | None:
     """Extrae el build number del header `Location` de un POST a buildWithParameters.
 
-    Formato esperado: 'http://jenkins/job/<job>/<n>/' o '/job/<job>/<n>/'.
+    Formatos soportados:
+      - '/job/<job>/<n>/'        -> devuelve n
+      - 'http://.../job/<job>/<n>/' -> idem
+      - '/queue/item/<id>/'      -> devuelve None (build encolada, sin nro)
     Devuelve None si el header no se puede parsear.
     """
     if not location_header:
         return None
-    # Tomamos el ultimo segmento con digitos.
+    if "/queue/item/" in location_header:
+        return None
     parts = [p for p in location_header.rstrip("/").split("/") if p]
     for p in reversed(parts):
         if p.isdigit():
             return int(p)
+    return None
+
+
+def _resolve_build_location(
+    base: str, location_header: str, job: str
+) -> tuple[str, int | None]:
+    """Resuelve la URL canonica y el numero de build desde el header
+    `Location` de un POST a buildWithParameters.
+
+    Si el header apunta a `/job/<job>/<n>/`, devuelve (url, n) directo.
+    Si apunta a `/queue/item/<id>/` (build encolada), consulta a Jenkins
+    para resolver el numero via la API de queue (`executable.url`).
+    Si la queue API falla o devuelve algo inesperado, devuelve
+    (url_de_queue, None) y el polling posterior se hara con esa URL
+    (Jenkins redirige /queue/item/<id>/ al /job/<job>/<n>/ real una
+    vez que arranca el build).
+
+    Esto es la fuente de verdad para "donde esta mi build" segun
+    Jenkins: el caller debe usar SIEMPRE la URL canonica devuelta
+    aca, nunca rearmar la URL a partir de un numero que podria estar
+    desincronizado.
+    """
+    if not location_header:
+        # Sin Location: caemos al lastBuild de la job. Es mejor que
+        # devolver None: la proxima build que se cree podria no ser
+        # la nuestra si hay builds encoladas.
+        url = f"{base}/job/{job}/lastBuild/api/json"
+        try:
+            resp = requests.get(url, timeout=JENKINS_TIMEOUT, auth=_auth())
+        except requests.RequestException:
+            return f"{base}/job/{job}", None
+        if resp.status_code != 200:
+            return f"{base}/job/{job}", None
+        data = resp.json()
+        n = data.get("number")
+        return (f"{base}/job/{job}/{n}" if n else f"{base}/job/{job}"), n
+
+    # Normalizar a URL absoluta.
+    if location_header.startswith("/"):
+        loc = f"{base}{location_header}"
+    elif location_header.startswith("http"):
+        loc = location_header
+    else:
+        loc = f"{base}/{location_header}"
+    loc = loc.rstrip("/")
+
+    # Caso 1: location ya tiene numero de build.
+    n = _parse_build_number(loc)
+    if n is not None:
+        return loc, n
+
+    # Caso 2: location apunta a /queue/item/<id>/. Resolvemos via queue API.
+    if "/queue/item/" in loc:
+        try:
+            resp = requests.get(
+                f"{loc}/api/json",
+                timeout=JENKINS_TIMEOUT,
+                auth=_auth(),
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "jenkins.resolve_build_location QUEUE_NET_ERROR location=%s err=%s",
+                loc, exc,
+            )
+            return loc, None
+        if resp.status_code != 200:
+            logger.warning(
+                "jenkins.resolve_build_location QUEUE_HTTP_ERROR location=%s status=%s",
+                loc, resp.status_code,
+            )
+            return loc, None
+        try:
+            data = resp.json()
+        except ValueError:
+            return loc, None
+        executable = data.get("executable") or {}
+        executable_url = executable.get("url")
+        executable_number = executable.get("number")
+        if executable_url:
+            # executable.url es absoluta y ya tiene /job/<job>/<n>/ al final.
+            return executable_url.rstrip("/"), executable_number
+        # Build todavia encolada (jenkins no la promovio a ejecutable
+        # todavia). Devolvemos la URL de queue; el polling posterior
+        # funcionara: GET /queue/item/<id>/api/json -> 200 con executable
+        # una vez que arranque.
+        return loc, None
+
+    # Caso 3: location con un formato raro que no pudimos parsear.
+    return loc, None
+
+
+def _auth() -> tuple | None:
+    """Auth opcional para endpoints de Jenkins cuando CSRF esta off.
+
+    Reutiliza el mismo patron que el resto del modulo: si JENKINS_USER/
+    JENKINS_TOKEN estan configurados, los usa. Si no, sin auth.
+    """
+    user = os.environ.get("JENKINS_USER") or ""
+    token = os.environ.get("JENKINS_TOKEN") or ""
+    if user and token:
+        return (user, token)
     return None
 
 

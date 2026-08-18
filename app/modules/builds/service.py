@@ -61,19 +61,32 @@ class BuildsService:
         """Hace una llamada a Jenkins para actualizar el status del build.
         Errores de red o Jenkins se loguean y se descartan: el caller
         no debe romperse porque Jenkins tenga un blip.
+
+        Usa la URL canonica (`build.jenkins_url`) que Jenkins devolvio
+        en el header `Location` del trigger. NO reconstruye la URL a
+        partir de `jenkins_number`, porque ese numero puede estar
+        desincronizado (build encolada, restart del controller, race
+        entre trigger y query). Si jenkins_url falta por algun motivo
+        extremo, se cae al fallback por numero.
         """
-        from app.modules.apps.model import Application  # noqa: F401
         logger.info(
-            "builds.poll START build_id=%s job=%s number=%s current_status=%s",
-            build.id, build.jenkins_job, build.jenkins_number, build.status,
+            "builds.poll START build_id=%s job=%s number=%s url=%s current_status=%s",
+            build.id, build.jenkins_job, build.jenkins_number, build.jenkins_url,
+            build.status,
         )
+        slug = _slug_from_job(build.jenkins_job)
         try:
-            status = JenkinsService.get_build_status(
-                # jenkins_job es `laurel_<slug>`; el service agrega el prefix,
-                # asi que le pasamos solo el slug.
-                slug=_slug_from_job(build.jenkins_job),
-                build_number=build.jenkins_number,
-            )
+            if build.jenkins_url:
+                status = JenkinsService.get_build_status(
+                    slug=slug, build_url=build.jenkins_url,
+                )
+            else:
+                # Fallback: rearmar desde el numero. No es ideal (puede
+                # apuntar a otra build si el numero se desincronizo) pero
+                # permite al menos intentar el polling.
+                status = JenkinsService.get_build_status(
+                    slug=slug, build_number=build.jenkins_number,
+                )
         except AppError as exc:
             logger.warning(
                 "builds.poll FAIL build_id=%s job=%s n=%s err=%s",
@@ -83,6 +96,14 @@ class BuildsService:
 
         old_status = build.status
         new_status = status["status"]
+        # Si Jenkins nos devolvio un numero, lo guardamos (puede haberse
+        # asignado despues del trigger, o el caller solo lo tenia en queue).
+        if status.get("number") and status["number"] != build.jenkins_number:
+            build.jenkins_number = status["number"]
+            # Si la URL no tenia el numero, la actualizamos con la canonica.
+            if build.jenkins_url and f"/{status['number']}" not in build.jenkins_url:
+                base_url = build.jenkins_url.rstrip("/").rsplit("/", 1)[0]
+                build.jenkins_url = f"{base_url}/{status['number']}"
         if new_status == build.status and build.started_at and status.get("timestamp"):
             # Sin cambio de estado, no reseteamos started_at.
             logger.info(
