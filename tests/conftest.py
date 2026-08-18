@@ -39,6 +39,17 @@ def app():
         with db.engine.connect() as _conn:
             pass
         db.create_all()
+        # Sin Jenkins real en tests: stub de create_job/delete_job. Asi
+        # AppsService.create puede correr el step 5 sin pegarle a un
+        # servidor inexistente. Si un test quiere verificar la creacion
+        # del job, puede sobreescribir este mock con monkeypatch.
+        from app.modules.integrations.jenkins import service as jenkins_svc
+        jenkins_svc.JenkinsService.create_job = staticmethod(
+            lambda slug, test_cmd, image_base, github_repo_url=None: True
+        )
+        jenkins_svc.JenkinsService.delete_job = staticmethod(
+            lambda slug: True
+        )
         yield app
         db.session.remove()
         db.drop_all()

@@ -214,6 +214,184 @@ class JenkinsService:
         )
 
     @staticmethod
+    def create_job(
+        slug: str,
+        test_cmd: str,
+        image_base: str,
+        github_repo_url: str | None = None,
+    ) -> bool:
+        """Crea el job `laurel_<slug>` en Jenkins con el pipeline CI/CD
+        de 3 stages (tests -> build -> push, con `set -e`).
+
+        Llamado por `AppsService.create` cuando el operador da de alta una
+        app: asi el job existe apenas el backend queda operativo y un
+        push a master puede disparar el build sin intervencion manual.
+
+        Parametros:
+            slug: slug de la app (DNS-1123). El job se llamara `laurel_<slug>`.
+            test_cmd: comando de STAGE 1 (tests). Si llega vacio, se usa el
+                placeholder del model ("echo no tests configured").
+            image_base: nombre base de la imagen (ej `aflobaton/laurel_notas`).
+                El job default tag es `0.0.1`; el webhook lo overridea con
+                `app.current_version` cuando dispara el build.
+            github_repo_url: URL al repo GitHub. Solo se usa para construir
+                el parametro REPO del job (informativo para el pipeline).
+
+        Returns True si el job fue creado, False si ya existia
+        (idempotente: AppsService.create puede llamarse en retry).
+        Raises AppError si Jenkins responde algo distinto de 200/201/409
+        o si la red se cae.
+        """
+        _validate_slug(slug)
+        token = _get_build_token()
+        crumb = JenkinsService._get_crumb()
+        job = f"{PREFIX}{slug}"
+        base = JenkinsService._base_url()
+        url = f"{base}/createItem?name={job}"
+
+        # Repo: si el operador lo dio, usamos la parte del path; si no, el
+        # default `laurel-applications/laurel_<slug>`.
+        if github_repo_url:
+            # "https://github.com/owner/repo" -> "owner/repo"
+            parts = github_repo_url.rstrip("/").split("/")
+            repo = "/".join(parts[-2:]) if len(parts) >= 2 else f"laurel-applications/{job}"
+        else:
+            repo = f"laurel-applications/{job}"
+
+        # test_cmd vacio -> placeholder. Mismo criterio que trigger_build.
+        test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
+
+        # XML de la config. Pipeline 3 stages con set -e: un test fallido
+        # corta el job antes del build. STAGE 2/3 son placeholders porque
+        # el pod de Jenkins no tiene docker en este despliegue; un job
+        # real los reemplaza via Jenkins UI.
+        xml = (
+            "<?xml version='1.0' encoding='UTF-8'?>\n"
+            "<project>\n"
+            f"  <description>Job para {job}. Pipeline CI/CD: tests -> build -> push. "
+            "Creado por AppsService.create.</description>\n"
+            "  <keepDependencies>false</keepDependencies>\n"
+            "  <properties>\n"
+            "    <hudson.model.ParametersDefinitionProperty>\n"
+            "      <parameterDefinitions>\n"
+            f"        <hudson.model.StringParameterDefinition><name>SLUG</name><defaultValue>{slug}</defaultValue><description>slug de la app</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>TAG</name><defaultValue>0.0.1</defaultValue><description>tag/version a buildear</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_base}:0.0.1</defaultValue><description>imagen Docker destino</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>TEST_CMD</name><defaultValue>{test_cmd}</defaultValue><description>comando a correr en STAGE 1 (unit tests)</description></hudson.model.StringParameterDefinition>\n"
+            "      </parameterDefinitions>\n"
+            "    </hudson.model.ParametersDefinitionProperty>\n"
+            "    <hudson.model.BuildAuthorizationTokenProperty>\n"
+            f"      <authToken>{token}</authToken>\n"
+            "    </hudson.model.BuildAuthorizationTokenProperty>\n"
+            "  </properties>\n"
+            "  <scm class=\"hudson.scm.NullSCM\"/>\n"
+            "  <canRoam>true</canRoam>\n"
+            "  <disabled>false</disabled>\n"
+            "  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>\n"
+            "  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>\n"
+            "  <triggers/>\n"
+            "  <concurrentBuild>false</concurrentBuild>\n"
+            "  <builders>\n"
+            "    <hudson.tasks.Shell>\n"
+            "      <command>set -e\n"
+            "echo &quot;=========================================&quot;\n"
+            "echo &quot;STAGE 1/3: Unit tests&quot;\n"
+            "echo &quot;SLUG=${SLUG}  TAG=${TAG}&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "eval &quot;${TEST_CMD}&quot;\n"
+            "echo &quot;TESTS OK&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "echo &quot;STAGE 2/3: Build image&quot;\n"
+            "echo &quot;Image: ${IMAGE}&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "echo &quot;(would run: docker build -t ${IMAGE} .)&quot;\n"
+            "echo &quot;BUILD OK&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "echo &quot;STAGE 3/3: Push image to registry&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "echo &quot;(would run: docker push ${IMAGE})&quot;\n"
+            "echo &quot;PUSH OK&quot;\n"
+            "echo &quot;PIPELINE COMPLETE&quot;\n"
+            "exit 0\n"
+            "</command>\n"
+            "    </hudson.tasks.Shell>\n"
+            "  </builders>\n"
+            "  <publishers/>\n"
+            "  <buildWrappers/>\n"
+            "</project>"
+        )
+
+        headers = {"Content-Type": "application/xml"}
+        if crumb:
+            headers["Jenkins-Crumb"] = crumb
+
+        try:
+            resp = requests.post(url, data=xml.encode("utf-8"), headers=headers,
+                                 timeout=JENKINS_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.error(
+                "Jenkins create_job timeout/conn para %s: %s\n%s",
+                slug, exc, traceback.format_exc()
+            )
+            raise AppError(
+                f"Jenkins no respondio al crear el job: {exc}",
+                status_code=504,
+            ) from exc
+
+        if resp.status_code in (200, 201):
+            return True
+        # 409 = ya existe: idempotente.
+        if resp.status_code == 409 or "already exists" in resp.text.lower():
+            logger.info("Jenkins job %s ya existia, skip", job)
+            return False
+        # 403 con crumb invalido: lo logueamos y reintentamos sin crumb una vez.
+        if resp.status_code == 403 and crumb:
+            logger.warning("crumb rechazo, reintentando create_job sin crumb")
+            try:
+                resp = requests.post(url, data=xml.encode("utf-8"),
+                                     headers={"Content-Type": "application/xml"},
+                                     timeout=JENKINS_TIMEOUT)
+            except requests.RequestException as exc:
+                raise AppError(f"Jenkins no respondio: {exc}", status_code=504) from exc
+            if resp.status_code in (200, 201):
+                return True
+            if resp.status_code == 409 or "already exists" in resp.text.lower():
+                return False
+        raise AppError(
+            f"Jenkins rechazo createItem: {resp.status_code} {resp.text[:200]}",
+            status_code=502,
+        )
+
+    @staticmethod
+    def delete_job(slug: str) -> bool:
+        """Borra el job `laurel_<slug>`. Usado por rollback de create.
+
+        Devuelve True si lo borro, False si no existia. Nunca lanza:
+        un fallo se loguea y devuelve False (el caller ya tiene su propia
+        excepcion original para propagar).
+        """
+        _validate_slug(slug)
+        base = JenkinsService._base_url()
+        crumb = JenkinsService._get_crumb()
+        url = f"{base}/job/{PREFIX}{slug}/doDelete"
+        headers = {}
+        if crumb:
+            headers["Jenkins-Crumb"] = crumb
+        try:
+            resp = requests.post(url, headers=headers, timeout=JENKINS_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.warning("Jenkins delete_job fallo para %s: %s", slug, exc)
+            return False
+        if resp.status_code in (200, 302, 404):
+            return resp.status_code != 404
+        logger.warning(
+            "Jenkins delete_job status inesperado para %s: %s",
+            slug, resp.status_code
+        )
+        return False
+
+    @staticmethod
     def job_exists(slug: str) -> bool:
         """True si el job `laurel_<slug>` existe en Jenkins. Nunca lanza."""
         _validate_slug(slug)

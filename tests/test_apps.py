@@ -289,3 +289,57 @@ class TestApplicationCreateRollback:
         assert len(_FakeCore.create_calls) == 2
         assert _FakeCore.delete_calls == [_FakeCore.create_calls[1]]
         reset_clients()
+
+
+class TestAppCreateJenkinsJob:
+    """Al crear una app, el backend crea el job laurel_<slug> en Jenkins."""
+
+    def test_create_also_creates_jenkins_job(self, client, app_payload, monkeypatch):
+        from app.modules.integrations.jenkins.service import JenkinsService
+        called = {"args": None}
+
+        def fake_create(slug, test_cmd, image_base, github_repo_url=None):
+            called["args"] = {
+                "slug": slug, "test_cmd": test_cmd,
+                "image_base": image_base, "github_repo_url": github_repo_url,
+            }
+            return True
+
+        monkeypatch.setattr(JenkinsService, "create_job", staticmethod(fake_create))
+
+        r = client.post("/api/apps", json=app_payload)
+        assert r.status_code == 201, r.get_json()
+
+        assert called["args"] is not None, "create_job no fue llamado"
+        assert called["args"]["slug"] == "notas"
+        assert "no tests" in called["args"]["test_cmd"]
+        assert called["args"]["image_base"]  # default generado por ContainerRegistryService
+
+        # Y el evento 'jenkins_job' aparece en el timeline
+        app_id = r.get_json()["id"]
+        events_r = client.get(f"/api/apps/{app_id}/events")
+        events = events_r.get_json()["items"]
+        jenkins_events = [e for e in events if e["event"] == "jenkins_job"]
+        assert len(jenkins_events) == 1
+        assert jenkins_events[0]["status"] == "ok"
+
+    def test_jenkins_failure_rolls_back_app(self, client, app_payload, monkeypatch):
+        """Si Jenkins falla al crear el job, la app tampoco queda en la BD."""
+        from app.core.errors import AppError
+        from app.modules.integrations.jenkins.service import JenkinsService
+
+        def fake_create_boom(slug, test_cmd, image_base, github_repo_url=None):
+            raise AppError("Jenkins unavailable", status_code=503)
+
+        monkeypatch.setattr(JenkinsService, "create_job", staticmethod(fake_create_boom))
+
+        r = client.post("/api/apps", json=app_payload)
+        assert r.status_code == 503, r.get_json()
+        assert r.get_json().get("details", {}).get("step") == "jenkins_job"
+
+        # La app NO debe estar en la BD
+        from app.modules.apps.model import Application
+        from app.core.db import db
+        with client.application.app_context():
+            found = Application.query.filter_by(slug="notas").first()
+            assert found is None, "App quedo en BD pese a fallo de Jenkins"

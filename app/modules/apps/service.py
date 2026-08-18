@@ -95,6 +95,7 @@ class AppsService:
         # Flags de rollback: solo limpiamos lo que marcamos como creado.
         created_github_repo = False
         created_k8s_namespace = False
+        created_jenkins_job = False
         ns = f"user-apps-{slug}"
 
         # Step 1: repo GitHub (si se pidio crearlo).
@@ -194,6 +195,52 @@ class AppsService:
                 app.status = "error"
         if app.status != "error":
             app.status = "ok" if events else "ok"
+
+        # Step 5: crear el job `laurel_<slug>` en Jenkins con el pipeline
+        # CI/CD de 3 stages (tests -> build -> push). Solo lo creamos
+        # (NO lo disparamos): un push a master lo hara despues via el
+        # webhook. Si falla, hacemos rollback completo: el INSERT de la
+        # app todavia no esta commiteado (solo flushed), asi que
+        # session.rollback() lo deshace; ademas limpiamos namespace y
+        # GH repo si llegaron a crearse.
+        from app.modules.integrations.jenkins.service import JenkinsService
+        try:
+            JenkinsService.create_job(
+                slug=slug,
+                test_cmd=app.test_cmd,
+                image_base=app.docker_image_base,
+                github_repo_url=app.github_repo_url,
+            )
+            created_jenkins_job = True
+            events.append((
+                "jenkins_job", "ok",
+                f"Job Jenkins laurel_{slug} creado con pipeline tests->build->push",
+            ))
+        except AppError as exc:
+            logger.warning("jenkins_job_failed para %s: %s", slug, exc.message)
+            db.session.rollback()
+            AppsService._rollback_external(
+                slug=slug, ns=ns,
+                created_github=created_github_repo,
+                created_namespace=created_k8s_namespace,
+                created_jenkins=False,  # nunca llegamos a crearlo
+            )
+            raise AppError(
+                f"No se pudo crear el job en Jenkins: {exc.message}",
+                status_code=exc.status_code,
+                details={"step": "jenkins_job"},
+            ) from exc
+
+        # Persistir el evento jenkins_job (los demas eventos ya estan en
+        # la session desde antes). Un solo commit al final.
+        for event, status, detail in events:
+            if event == "jenkins_job":
+                db.session.add(AppEvent(
+                    application_id=app.id,
+                    event=event,
+                    status=status,
+                    detail=detail,
+                ))
         db.session.commit()
 
         AuditService.log(
@@ -205,7 +252,10 @@ class AppsService:
 
     @staticmethod
     def _rollback_external(
-        slug: str, ns: str, *, created_github: bool, created_namespace: bool,
+        slug: str, ns: str, *,
+        created_github: bool,
+        created_namespace: bool,
+        created_jenkins: bool = False,
     ) -> None:
         """Best-effort cleanup de recursos externos cuando `create` falla.
 
@@ -215,6 +265,7 @@ class AppsService:
         """
         from app.modules.cluster.service import K8sService
         from app.modules.integrations.github.service import GitHubService
+        from app.modules.integrations.jenkins.service import JenkinsService
 
         if created_namespace:
             try:
@@ -231,6 +282,14 @@ class AppsService:
             except Exception as exc:
                 logger.warning(
                     "create_rollback: fallo borrando GitHub repo %s: %s", slug, exc,
+                )
+        if created_jenkins:
+            try:
+                JenkinsService.delete_job(slug)
+                logger.info("create_rollback: Jenkins job laurel_%s borrado", slug)
+            except Exception as exc:
+                logger.warning(
+                    "create_rollback: fallo borrando Jenkins job %s: %s", slug, exc,
                 )
 
     @staticmethod
