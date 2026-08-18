@@ -343,3 +343,74 @@ class TestAppCreateJenkinsJob:
         with client.application.app_context():
             found = Application.query.filter_by(slug="notas").first()
             assert found is None, "App quedo en BD pese a fallo de Jenkins"
+
+
+class TestAppHardDeleteJenkins:
+    """Al hacer hard-delete de la app, tambien se borra el job de Jenkins."""
+
+    def test_hard_delete_calls_jenkins_delete_job(self, app, client, monkeypatch):
+        from app.modules.integrations.jenkins.service import JenkinsService
+
+        # Seed: una app + su app_build para que delete recorra el camino completo
+        from app.modules.apps.model import Application
+        from app.modules.builds.model import AppBuild
+        from app.core.db import db
+        with app.app_context():
+            app_obj = Application(
+                slug="demo-del",
+                name="App a borrar",
+                docker_image_base="aflobaton/laurel_demo-del",
+                current_version="1.0.0",
+            )
+            db.session.add(app_obj)
+            db.session.commit()
+            app_id = app_obj.id
+
+            # Mock: el job existe, el borrado devuelve True
+            monkeypatch.setattr(JenkinsService, "job_exists",
+                                staticmethod(lambda slug: True))
+            deleted = {"called": 0, "slug": None}
+            def fake_delete(slug):
+                deleted["called"] += 1
+                deleted["slug"] = slug
+                return True
+            monkeypatch.setattr(JenkinsService, "delete_job",
+                                staticmethod(fake_delete))
+
+        r = client.delete(f"/api/apps/{app_id}")
+        assert r.status_code == 200, r.get_json()
+
+        assert deleted["called"] == 1
+        assert deleted["slug"] == "demo-del"
+
+        # La app esta borrada de la BD
+        with app.app_context():
+            assert Application.query.get(app_id) is None
+
+    def test_hard_delete_succeeds_when_jenkins_unreachable(self, app, client, monkeypatch):
+        """Si Jenkins no responde, la app igual se borra (best-effort)."""
+        from app.modules.integrations.jenkins.service import JenkinsService
+        from app.modules.apps.model import Application
+        from app.core.db import db
+
+        with app.app_context():
+            app_obj = Application(
+                slug="demo-del2",
+                name="App a borrar 2",
+                docker_image_base="aflobaton/laurel_demo-del2",
+            )
+            db.session.add(app_obj)
+            db.session.commit()
+            app_id = app_obj.id
+
+        # Jenkins job_exists tira excepcion (cluster caido, token invalido, etc)
+        def boom(slug):
+            raise RuntimeError("Jenkins unreachable")
+        monkeypatch.setattr(JenkinsService, "job_exists", staticmethod(boom))
+
+        r = client.delete(f"/api/apps/{app_id}")
+        assert r.status_code == 200, r.get_json()
+
+        # La app igual se borro
+        with app.app_context():
+            assert Application.query.get(app_id) is None

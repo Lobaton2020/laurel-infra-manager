@@ -330,14 +330,17 @@ class AppsService:
           snapshot.
         - GitHub: borra el repo `laurel_<slug>` en la org.
         - GHCR: borra el paquete `laurel_<slug>` en GHCR.
+        - Jenkins: borra el job `laurel_<slug>` con el pipeline CI/CD.
 
-        Si algun paso externo falla (k8s/github/ghcr), logueamos warning
-        y seguimos con el resto: la app debe quedar eliminada en la BD.
+        Si algun paso externo falla (k8s/github/ghcr/jenkins), logueamos
+        warning y seguimos con el resto: la app debe quedar eliminada
+        en la BD aunque queden recursos huerfanos en el cluster.
         """
         from app.modules.apps.model import AppDeletionLog
         from app.modules.cluster.service import K8sService
         from app.modules.integrations.docker.service import ContainerRegistryService
         from app.modules.integrations.github.service import GitHubService
+        from app.modules.integrations.jenkins.service import JenkinsService
 
         app = AppsService.get(app_id)
         slug = app.slug
@@ -384,6 +387,19 @@ class AppsService:
             ContainerRegistryService.delete_package(slug)
         except Exception as exc:
             logger.warning("app_hard_delete: fallo borrando paquete GHCR para %s: %s", slug, exc)
+
+        # 3.5) Jenkins: borrar el job `laurel_<slug>`. Asi no queda un job
+        #      huerfano apuntando a un repo borrado. Si el cluster no tiene
+        #      Jenkins configurado, el service devuelve False sin lanzar.
+        try:
+            if JenkinsService.job_exists(slug):
+                deleted = JenkinsService.delete_job(slug)
+                if deleted:
+                    logger.info("app_hard_delete: Jenkins job laurel_%s borrado", slug)
+                else:
+                    logger.warning("app_hard_delete: Jenkins job laurel_%s no se borro", slug)
+        except Exception as exc:
+            logger.warning("app_hard_delete: fallo borrando Jenkins job %s: %s", slug, exc)
 
         # 4) DB: HARD DELETE. Las FKs declaradas en los modelos (scoops SET NULL,
         #    domains CASCADE, app_events CASCADE) hacen el resto. En SQLite
