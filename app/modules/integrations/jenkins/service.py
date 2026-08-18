@@ -122,8 +122,15 @@ class JenkinsService:
             return ""
 
     @staticmethod
-    def trigger_build(slug: str, tag: str) -> dict:
+    def trigger_build(slug: str, tag: str, test_cmd: str | None = None) -> dict:
         """Dispara el build remoto de `laurel_<slug>` con `tag`.
+
+        El job de Jenkins corre un pipeline de 3 stages (tests -> build ->
+        push) con `set -e`, por lo que si el TEST_CMD falla, no se intenta
+        buildear la imagen. El operador configura `test_cmd` por app
+        (default en el model: `echo 'no tests configured'`); si llega vacio
+        o None, se manda un placeholder para que Jenkins no falle por param
+        faltante.
 
         Auth por Jenkins build token (trigger remoto): el token va en el
         query param. Returns `{"job", "number", "url"}` donde `url` es
@@ -142,6 +149,12 @@ class JenkinsService:
         base = JenkinsService._base_url()
         url = f"{base}/job/{job}/buildWithParameters"
 
+        # Si test_cmd viene vacio o None, mandamos un placeholder seguro.
+        # Jenkins lo corre con `set -e` + `eval`, asi que cualquier string
+        # que termine con exit 0 sirve. El operador deberia haberlo
+        # configurado a algo real (pytest, npm test, etc).
+        test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
+
         headers = {}
         if crumb:
             headers["Jenkins-Crumb"] = crumb
@@ -155,6 +168,7 @@ class JenkinsService:
                     "TAG": tag,
                     "REPO": f"laurel-applications/{job}",
                     "IMAGE": f"aflobaton/{job}:{tag}",
+                    "TEST_CMD": test_cmd,
                 },
                 headers=headers,
                 timeout=JENKINS_TIMEOUT,

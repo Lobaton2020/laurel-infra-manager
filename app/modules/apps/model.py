@@ -57,6 +57,13 @@ class Application(db.Model):
     # auto-bumpea desde 0.0.0 (legado).
     current_version = db.Column(db.String(50), default="0.0.1", nullable=False)
 
+    # Comando de tests unitarios que Jenkins corre como STAGE 1 del pipeline
+    # (tests -> build -> push, con `set -e` para fail-fast). El operador lo
+    # setea al crear la app; si esta vacio, Jenkins corre un placeholder
+    # que siempre pasa. La idea es que cada app defina su propio comando
+    # (`pytest tests/`, `npm test`, `go test ./...`) sin tocar el codigo.
+    test_cmd = db.Column(db.Text, default="echo 'no tests configured'", nullable=False)
+
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     deleted_at = db.Column(db.DateTime)

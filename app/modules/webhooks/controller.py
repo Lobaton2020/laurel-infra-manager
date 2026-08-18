@@ -101,7 +101,9 @@ def github_webhook():
 
     jenkins_info: dict
     try:
-        result = JenkinsService.trigger_build(slug, new_version)
+        result = JenkinsService.trigger_build(
+            slug, new_version, test_cmd=app.test_cmd
+        )
         jenkins_info = {
             "triggered": True,
             "job": result["job"],
@@ -113,10 +115,7 @@ def github_webhook():
         # o token pendiente): se reporta y se devuelve 200. Aun asi creamos
         # el AppBuild con status='pending' para que aparezca en la lista
         # y el operador lo vea y pueda re-dispararlo.
-        logger.error(
-                "jenkins trigger fallo para %s: %s\n%s",
-                slug, exc.message, traceback.format_exc()
-            )
+        logger.warning("jenkins trigger fallo para %s: %s", slug, exc.message)
         jenkins_info = {"triggered": False, "error": exc.message}
 
     # Creamos el build record (incluso si Jenkins fallo al disparar:
