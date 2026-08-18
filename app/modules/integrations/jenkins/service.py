@@ -125,12 +125,19 @@ class JenkinsService:
     def trigger_build(slug: str, tag: str, test_cmd: str | None = None) -> dict:
         """Dispara el build remoto de `laurel_<slug>` con `tag`.
 
-        El job de Jenkins corre un pipeline de 3 stages (tests -> build ->
-        push) con `set -e`, por lo que si el TEST_CMD falla, no se intenta
-        buildear la imagen. El operador configura `test_cmd` por app
-        (default en el model: `echo 'no tests configured'`); si llega vacio
-        o None, se manda un placeholder para que Jenkins no falle por param
-        faltante.
+        El job de Jenkins corre un pipeline real de 3 stages (clone ->
+        tests -> kaniko build+push) con `set -e`, por lo que si el TEST_CMD
+        falla, no se intenta buildear la imagen. El operador configura
+        `test_cmd` por app (default en el model: `echo 'no tests
+        configured'`); si llega vacio o None, se manda un placeholder para
+        que Jenkins no falle por param faltante.
+
+        Ademas del test_cmd, inyectamos el `GITHUB_PAT` del backend (system
+        secret `github_pat` o env var `GITHUB_PAT`) como build parameter
+        PasswordParameter (auto-masked en logs). El job lo usa para
+        `git clone` de repos privados y para `docker login` en GHCR via
+        kaniko. Si el repo es publico y la app no escribe en GHCR, llega
+        como `placeholder` y el job cae al path sin auth.
 
         Auth por Jenkins build token (trigger remoto): el token va en el
         query param. Returns `{"job", "number", "url"}` donde `url` es
@@ -155,6 +162,50 @@ class JenkinsService:
         # configurado a algo real (pytest, npm test, etc).
         test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
 
+        # GITHUB_PAT: lo leemos igual que github/service.py (env var
+        # primero, fallback al system secret `github_pat`). Si no hay,
+        # mandamos "placeholder" y el job intenta sin auth (solo sirve
+        # para repos publicos sin push a GHCR).
+        try:
+            from app.modules.integrations.github.service import _get_pat
+            github_pat = _get_pat()
+        except AppError:
+            github_pat = ""
+
+        # IMAGE: el job espera `owner/repo` sin registry ni tag (lo
+        # completa con `ghcr.io/${IMAGE}:${TAG}`). El operator puede
+        # haber puesto `ghcr.io/owner/repo:tag` en docker_image_base;
+        # limpiamos.
+        image_no_registry = job
+        # Leemos el image_base real del modelo para soportar overrides
+        # (operator pone otro registry/owner). Si la app no existe o el
+        # lookup falla, caemos al default `laurel_<slug>`.
+        try:
+            from app.modules.apps.model import Application as _App
+            from app.core.db import db as _db
+            app_id = _slug_to_app_id(slug)
+            if app_id is not None:
+                app_row = _db.session.get(_App, app_id)
+                if app_row and app_row.docker_image_base:
+                    ib = app_row.docker_image_base
+                    if "/" in ib:
+                        parts = ib.split("/")
+                        ib = "/".join(parts[-2:]) if len(parts) >= 2 else ib
+                    image_no_registry = ib.split(":")[0]
+        except Exception as exc:
+            logger.warning(
+                "trigger_build: no pude resolver image_base para %s, "
+                "uso default '%s': %s",
+                slug, image_no_registry, exc,
+            )
+
+        logger.info(
+            "jenkins.trigger_build START slug=%s tag=%s test_cmd_len=%d "
+            "image=%s has_pat=%s url=%s",
+            slug, tag, len(test_cmd), image_no_registry,
+            bool(github_pat), url,
+        )
+
         headers = {}
         if crumb:
             headers["Jenkins-Crumb"] = crumb
@@ -167,47 +218,61 @@ class JenkinsService:
                     "SLUG": slug,
                     "TAG": tag,
                     "REPO": f"laurel-applications/{job}",
-                    "IMAGE": f"aflobaton/{job}:{tag}",
+                    "IMAGE": image_no_registry,
                     "TEST_CMD": test_cmd,
+                    # PasswordParameter en el job: Jenkins lo enmascara
+                    # en el log del build. Viaja en el body del POST
+                    # (form-encoded), NO en la URL.
+                    "GITHUB_PAT": github_pat or "placeholder",
                 },
                 headers=headers,
                 timeout=JENKINS_TIMEOUT,
             )
         except requests.RequestException as exc:
             logger.error(
-                "Jenkins timeout excepcion en %s: %s\n%s",
-                url, exc, traceback.format_exc()
+                "jenkins.trigger_build CONN_ERROR slug=%s url=%s err=%s",
+                slug, url, exc,
             )
             raise AppError("Jenkins timeout", status_code=504) from exc
 
         resp_text = resp.text
         resp_headers = str(resp.headers)
+        location = resp.headers.get("Location", "")
+
+        logger.info(
+            "jenkins.trigger_build RESP slug=%s status=%s location=%s body_len=%d",
+            slug, resp.status_code, location, len(resp_text),
+        )
 
         if resp.status_code in (200, 201):
             # Jenkins responde 201 con un header `Location: /job/<job>/<n>/`
             # del que extraemos el numero de build. Si no esta, devolvemos
             # solo la URL del job y number=None.
-            number = _parse_build_number(resp.headers.get("Location"))
+            number = _parse_build_number(location)
             build_url = (
                 f"{base}/job/{job}/{number}" if number else f"{base}/job/{job}"
+            )
+            logger.info(
+                "jenkins.trigger_build OK slug=%s job=%s number=%s url=%s",
+                slug, job, number, build_url,
             )
             return {"job": job, "number": number, "url": build_url}
         if resp.status_code in (401, 403):
             logger.error(
-                "Jenkins authentication failed (status=%s)\n"
-                "Body: %s\n"
-                "Headers: %s",
-                resp.status_code, resp_text, resp_headers
+                "jenkins.trigger_build AUTH_FAIL slug=%s status=%s body=%s headers=%s",
+                slug, resp.status_code, resp_text[:200], resp_headers,
             )
             raise AppError("Jenkins authentication failed", status_code=502)
         if resp.status_code == 404:
             logger.error(
-                "Jenkins job not found (status=%s)\n"
-                "Job: %s\n"
-                "Body: %s",
-                resp.status_code, job, resp_text
+                "jenkins.trigger_build JOB_NOT_FOUND slug=%s status=%s body=%s",
+                slug, resp.status_code, resp_text[:200],
             )
             raise AppError(f"Jenkins job '{job}' not found", status_code=404)
+        logger.error(
+            "jenkins.trigger_build UNEXPECTED slug=%s status=%s body=%s",
+            slug, resp.status_code, resp_text[:200],
+        )
         raise AppError(
             f"Jenkins API error {resp.status_code}: {resp_text[:200]}",
             status_code=502,
@@ -261,14 +326,28 @@ class JenkinsService:
         # test_cmd vacio -> placeholder. Mismo criterio que trigger_build.
         test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
 
-        # XML de la config. Pipeline 3 stages con set -e: un test fallido
-        # corta el job antes del build. STAGE 2/3 son placeholders porque
-        # el pod de Jenkins no tiene docker en este despliegue; un job
-        # real los reemplaza via Jenkins UI.
+        # image_base puede llegar con tag (ej 'ghcr.io/owner/repo:0.0.1' o
+        # 'owner/repo:0.0.1'); el pipeline espera SIN tag + SIN registry
+        # porque lo completa con `ghcr.io/${IMAGE}:${TAG}`.
+        # Si el operador ya puso el registry adelante, lo sacamos.
+        if "/" in image_base:
+            parts = image_base.split("/")
+            image_no_registry = "/".join(parts[-2:]) if len(parts) >= 2 else image_base
+        else:
+            image_no_registry = image_base
+        image_no_registry = image_no_registry.split(":")[0]
+
+        # XML de la config. Pipeline real de 3 stages con set -e:
+        # 0. git clone (con GITHUB_PAT si llega en el trigger).
+        # 1. unit tests (eval $TEST_CMD) -> falla, corta antes del build.
+        # 2+3. kaniko build + push a ghcr.io (atomico, sin docker daemon).
+        # El `IMAGE` parametro es `owner/repo` sin registry/tag; el job
+        # agrega `ghcr.io/` y `:${TAG}`. `GITHUB_PAT` es un
+        # PasswordParameter auto-masked en logs.
         xml = (
             "<?xml version='1.0' encoding='UTF-8'?>\n"
             "<project>\n"
-            f"  <description>Job para {job}. Pipeline CI/CD: tests -> build -> push. "
+            f"  <description>Job para {job}. Pipeline CI/CD real: clone -> tests -> kaniko build+push a GHCR. "
             "Creado por AppsService.create.</description>\n"
             "  <keepDependencies>false</keepDependencies>\n"
             "  <properties>\n"
@@ -276,9 +355,10 @@ class JenkinsService:
             "      <parameterDefinitions>\n"
             f"        <hudson.model.StringParameterDefinition><name>SLUG</name><defaultValue>{slug}</defaultValue><description>slug de la app</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>TAG</name><defaultValue>0.0.1</defaultValue><description>tag/version a buildear</description></hudson.model.StringParameterDefinition>\n"
-            f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub</description></hudson.model.StringParameterDefinition>\n"
-            f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_base}:0.0.1</defaultValue><description>imagen Docker destino</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub (owner/name)</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_no_registry}</defaultValue><description>imagen destino SIN registry ni tag (e.g. owner/repo)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>TEST_CMD</name><defaultValue>{test_cmd}</defaultValue><description>comando a correr en STAGE 1 (unit tests)</description></hudson.model.StringParameterDefinition>\n"
+            "        <hudson.model.PasswordParameterDefinition><name>GITHUB_PAT</name><defaultValue>placeholder</defaultValue><description>GitHub PAT (repo + write:packages). Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "      </parameterDefinitions>\n"
             "    </hudson.model.ParametersDefinitionProperty>\n"
             "    <hudson.model.BuildAuthorizationTokenProperty>\n"
@@ -296,22 +376,42 @@ class JenkinsService:
             "    <hudson.tasks.Shell>\n"
             "      <command>set -e\n"
             "echo &quot;=========================================&quot;\n"
+            "echo &quot;STAGE 0/3: Clone repo&quot;\n"
+            "echo &quot;REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}&quot;\n"
+            "echo &quot;=========================================&quot;\n"
+            "rm -rf /workspace/* /workspace/.[!.]* 2&gt;/dev/null || true\n"
+            "cd /workspace\n"
+            "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
+            "  git clone &quot;https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git&quot; .\n"
+            "else\n"
+            "  git clone &quot;https://github.com/${REPO}.git&quot; .\n"
+            "fi\n"
+            "git checkout -q &quot;${TAG}&quot; 2&gt;/dev/null || git checkout -q master\n"
+            "ls -la\n"
+            "echo &quot;=========================================&quot;\n"
             "echo &quot;STAGE 1/3: Unit tests&quot;\n"
-            "echo &quot;SLUG=${SLUG}  TAG=${TAG}&quot;\n"
+            "echo &quot;TEST_CMD: ${TEST_CMD}&quot;\n"
             "echo &quot;=========================================&quot;\n"
             "eval &quot;${TEST_CMD}&quot;\n"
             "echo &quot;TESTS OK&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "echo &quot;STAGE 2/3: Build image&quot;\n"
-            "echo &quot;Image: ${IMAGE}&quot;\n"
+            "echo &quot;STAGE 2/3 + 3/3: Build &amp; push image (kaniko)&quot;\n"
+            "echo &quot;Destination: ghcr.io/${IMAGE}:${TAG}&quot;\n"
             "echo &quot;=========================================&quot;\n"
-            "echo &quot;(would run: docker build -t ${IMAGE} .)&quot;\n"
-            "echo &quot;BUILD OK&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            "echo &quot;STAGE 3/3: Push image to registry&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            "echo &quot;(would run: docker push ${IMAGE})&quot;\n"
-            "echo &quot;PUSH OK&quot;\n"
+            "export DOCKER_CONFIG=/workspace/.docker\n"
+            "mkdir -p &quot;$DOCKER_CONFIG&quot;\n"
+            "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
+            "  AUTH=$(printf &quot;x-access-token:%s&quot; &quot;${GITHUB_PAT}&quot; | base64 -w 0)\n"
+            "  printf '{&quot;auths&quot;:{&quot;ghcr.io&quot;:{&quot;auth&quot;:&quot;%s&quot;}}}\n' &quot;$AUTH&quot; &gt; &quot;$DOCKER_CONFIG/config.json&quot;\n"
+            "fi\n"
+            "/usr/local/kaniko/executor \\\n"
+            "  --context=/workspace \\\n"
+            "  --dockerfile=Dockerfile \\\n"
+            "  --destination=&quot;ghcr.io/${IMAGE}:${TAG}&quot; \\\n"
+            "  --cache=true \\\n"
+            "  --cache-repo=&quot;ghcr.io/laurel-applications/kaniko-cache&quot; \\\n"
+            "  --snapshot-mode=time\n"
+            "echo &quot;BUILD+PUSH OK&quot;\n"
             "echo &quot;PIPELINE COMPLETE&quot;\n"
             "exit 0\n"
             "</command>\n"
@@ -326,13 +426,17 @@ class JenkinsService:
         if crumb:
             headers["Jenkins-Crumb"] = crumb
 
+        logger.info(
+            "jenkins.create_job START slug=%s job=%s url=%s xml_len=%d",
+            slug, job, url, len(xml),
+        )
         try:
             resp = requests.post(url, data=xml.encode("utf-8"), headers=headers,
                                  timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
             logger.error(
-                "Jenkins create_job timeout/conn para %s: %s\n%s",
-                slug, exc, traceback.format_exc()
+                "jenkins.create_job CONN_ERROR slug=%s err=%s",
+                slug, exc,
             )
             raise AppError(
                 f"Jenkins no respondio al crear el job: {exc}",
@@ -340,14 +444,15 @@ class JenkinsService:
             ) from exc
 
         if resp.status_code in (200, 201):
+            logger.info("jenkins.create_job OK slug=%s job=%s", slug, job)
             return True
         # 409 = ya existe: idempotente.
         if resp.status_code == 409 or "already exists" in resp.text.lower():
-            logger.info("Jenkins job %s ya existia, skip", job)
+            logger.info("jenkins.create_job EXISTS slug=%s job=%s (409, skip)", slug, job)
             return False
         # 403 con crumb invalido: lo logueamos y reintentamos sin crumb una vez.
         if resp.status_code == 403 and crumb:
-            logger.warning("crumb rechazo, reintentando create_job sin crumb")
+            logger.warning("jenkins.create_job CRUMB_RETRY slug=%s (403 con crumb)", slug)
             try:
                 resp = requests.post(url, data=xml.encode("utf-8"),
                                      headers={"Content-Type": "application/xml"},
@@ -355,9 +460,15 @@ class JenkinsService:
             except requests.RequestException as exc:
                 raise AppError(f"Jenkins no respondio: {exc}", status_code=504) from exc
             if resp.status_code in (200, 201):
+                logger.info("jenkins.create_job OK_AFTER_RETRY slug=%s", slug)
                 return True
             if resp.status_code == 409 or "already exists" in resp.text.lower():
+                logger.info("jenkins.create_job EXISTS_AFTER_RETRY slug=%s", slug)
                 return False
+        logger.error(
+            "jenkins.create_job REJECTED slug=%s status=%s body=%s",
+            slug, resp.status_code, resp.text[:200],
+        )
         raise AppError(
             f"Jenkins rechazo createItem: {resp.status_code} {resp.text[:200]}",
             status_code=502,
@@ -378,16 +489,22 @@ class JenkinsService:
         headers = {}
         if crumb:
             headers["Jenkins-Crumb"] = crumb
+        logger.info("jenkins.delete_job START slug=%s url=%s", slug, url)
         try:
             resp = requests.post(url, headers=headers, timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
-            logger.warning("Jenkins delete_job fallo para %s: %s", slug, exc)
+            logger.warning("jenkins.delete_job CONN_ERROR slug=%s err=%s", slug, exc)
             return False
         if resp.status_code in (200, 302, 404):
-            return resp.status_code != 404
+            deleted = resp.status_code != 404
+            logger.info(
+                "jenkins.delete_job OK slug=%s status=%s deleted=%s",
+                slug, resp.status_code, deleted,
+            )
+            return deleted
         logger.warning(
-            "Jenkins delete_job status inesperado para %s: %s",
-            slug, resp.status_code
+            "jenkins.delete_job UNEXPECTED slug=%s status=%s body=%s",
+            slug, resp.status_code, resp.text[:200],
         )
         return False
 
@@ -423,20 +540,32 @@ class JenkinsService:
         _validate_slug(slug)
         base = JenkinsService._base_url()
         url = f"{base}/job/{PREFIX}{slug}/{build_number}/api/json"
+        logger.info(
+            "jenkins.get_build_status START slug=%s number=%s url=%s",
+            slug, build_number, url,
+        )
         try:
             resp = requests.get(url, timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
             logger.error(
-                "Jenkins get_build_status fallo: %s\n%s",
-                exc, traceback.format_exc()
+                "jenkins.get_build_status CONN_ERROR slug=%s number=%s err=%s",
+                slug, build_number, exc,
             )
             raise AppError("Jenkins timeout", status_code=504) from exc
         if resp.status_code == 404:
+            logger.warning(
+                "jenkins.get_build_status NOT_FOUND slug=%s number=%s",
+                slug, build_number,
+            )
             raise AppError(
                 f"Jenkins build {PREFIX}{slug}/{build_number} not found",
                 status_code=404,
             )
         if resp.status_code != 200:
+            logger.error(
+                "jenkins.get_build_status ERROR slug=%s number=%s status=%s body=%s",
+                slug, build_number, resp.status_code, resp.text[:200],
+            )
             raise AppError(
                 f"Jenkins API error {resp.status_code}: {resp.text[:200]}",
                 status_code=502,
@@ -448,6 +577,10 @@ class JenkinsService:
             status: BuildStatus = "running"
         else:
             status = _map_jenkins_result(result)
+        logger.info(
+            "jenkins.get_build_status OK slug=%s number=%s status=%s building=%s result=%s",
+            slug, build_number, status, building, result,
+        )
         return {
             "status": status,
             "building": building,
@@ -483,3 +616,17 @@ def _map_jenkins_result(result: str | None) -> BuildStatus:
     # result=None con building=False es raro; lo marcamos como failed
     # para no dejarlo colgado en 'pending' para siempre.
     return "failed"
+
+
+def _slug_to_app_id(slug: str) -> int | None:
+    """Resuelve el `id` de la Application por slug. None si no existe
+    o ya fue borrada (soft delete). Llamado en puntos frios (webhook,
+    trigger) — no vale la pena cachear."""
+    from app.core.db import db
+    from app.modules.apps.model import Application
+    row = (
+        db.session.query(Application.id)
+        .filter(Application.slug == slug, Application.deleted_at.is_(None))
+        .first()
+    )
+    return row[0] if row else None

@@ -42,7 +42,7 @@ class TestTriggerBuild:
 
         def _post(url, params=None, data=None, timeout=None, **kwargs):
             posted.update(url=url, params=params, data=data, timeout=timeout, headers=kwargs.get("headers"))
-            resp = Mock(status_code=201)
+            resp = Mock(status_code=201, text="")
             # Jenkins responde 201 con header `Location: /job/<job>/<n>/`.
             resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/42/"}
             return resp
@@ -60,12 +60,15 @@ class TestTriggerBuild:
         assert posted["url"] == "http://jenkins:8080/job/laurel_notas/buildWithParameters"
         assert posted["params"] == {"token": "tok123"}
         assert posted["timeout"] == jenkins_service.JENKINS_TIMEOUT
+        # El IMAGE se envia SIN registry ni tag (el job agrega ghcr.io/ y :${TAG}).
+        # GITHUB_PAT: el test no tiene app ni system secret -> "placeholder".
         assert posted["data"] == {
             "SLUG": "notas",
             "TAG": "1.2.4",
             "REPO": "laurel-applications/laurel_notas",
-            "IMAGE": "aflobaton/laurel_notas:1.2.4",
+            "IMAGE": "laurel_notas",
             "TEST_CMD": "echo '[no test_cmd configured]'",
+            "GITHUB_PAT": "placeholder",
         }
 
     def test_trigger_passes_custom_test_cmd(self, app, monkeypatch):
@@ -75,7 +78,7 @@ class TestTriggerBuild:
 
         def _post(url, params=None, data=None, timeout=None, **kwargs):
             posted.update(data=data)
-            resp = Mock(status_code=201)
+            resp = Mock(status_code=201, text="")
             resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/1/"}
             return resp
 
@@ -93,7 +96,7 @@ class TestTriggerBuild:
 
         def _post(url, params=None, data=None, timeout=None, **kwargs):
             posted.update(data=data)
-            resp = Mock(status_code=201)
+            resp = Mock(status_code=201, text="")
             resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/1/"}
             return resp
 

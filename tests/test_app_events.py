@@ -37,20 +37,24 @@ def ws(client, auth):
 class TestAppProvisionEvents:
     def test_create_app_with_workspace_records_events_and_ok(self, client, auth, ws):
         # Sin PATs (TestConfig los vacia): github no pedido -> error, GHCR ok
-        # por defecto, namespace K8s ok (no-op en tests: cluster mocked).
+        # por defecto, namespace K8s ok (no-op en tests: cluster mocked),
+        # Jenkins job ok (create_job mockeado en este test suite).
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()
         assert app["workspace_id"] == ws["id"]
         assert app["status"] == "error"
         events = app["events"]
-        assert len(events) == 3
+        # 4 eventos: github_repo, ghcr_repo, k8s_namespace, jenkins_job.
+        assert len(events) == 4
         assert events[0]["event"] == "github_repo"
         assert events[0]["status"] == "error"
         assert events[1]["event"] == "ghcr_repo"
         assert events[1]["status"] == "ok"
         assert events[2]["event"] == "k8s_namespace"
         assert events[2]["status"] == "ok"
+        assert events[3]["event"] == "jenkins_job"
+        assert events[3]["status"] == "ok"
 
     def test_create_app_with_manual_repos_is_ok(self, client, auth, ws):
         # Con repos provistos manualmente, todos los checks son ok.
@@ -64,7 +68,12 @@ class TestAppProvisionEvents:
         app = r.get_json()
         assert app["status"] == "ok"
         statuses = {e["event"]: e["status"] for e in app["events"]}
-        assert statuses == {"github_repo": "ok", "ghcr_repo": "ok", "k8s_namespace": "ok"}
+        assert statuses == {
+            "github_repo": "ok",
+            "ghcr_repo": "ok",
+            "k8s_namespace": "ok",
+            "jenkins_job": "ok",
+        }
 
     def test_events_endpoint_returns_timeline(self, client, auth, ws):
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
@@ -72,7 +81,7 @@ class TestAppProvisionEvents:
         r = client.get(f"/api/apps/{app_id}/events", headers=auth())
         assert r.status_code == 200
         items = r.get_json()["items"]
-        assert len(items) == 3
+        assert len(items) == 4
 
     def test_list_apps_filters_by_workspace(self, client, auth, ws):
         ws2 = client.post("/api/workspaces", json={"name": "Otro"}, headers=auth()).get_json()

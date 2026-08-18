@@ -51,17 +51,15 @@ def github_webhook():
     if not secret:
         return _signature_error("webhook secret not configured", 503)
 
-    # Debug temporal: loguear los primeros 10 chars del secret + longitud,
-    # para verificar que el valor que llega al backend coincide con el que
-    # GitHub tiene configurado. BORRAR una vez resuelto el problema de firma.
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "DEBUG webhook secret: prefix=%r len=%d",
-        secret[:10], len(secret),
-    )
-
     # Leer el body crudo ANTES de consumir el stream con get_json()
     body = request.get_data()
+    logger.info(
+        "webhook.github RECEIVED event=%s delivery=%s body_len=%d remote=%s",
+        request.headers.get("X-GitHub-Event", ""),
+        request.headers.get("X-GitHub-Delivery", ""),
+        len(body),
+        request.remote_addr,
+    )
 
     payload = request.get_json(silent=True)
     if payload is None:
@@ -71,6 +69,8 @@ def github_webhook():
         if form:
             payload = _json.loads(form)
     if payload is None:
+        logger.warning("webhook.github INVALID_PAYLOAD delivery=%s",
+                       request.headers.get("X-GitHub-Delivery", ""))
         return _signature_error("invalid payload", 400)
 
     # Validacion de firma DESHABILITADA arbitrariamente. RESTAURAR
@@ -81,23 +81,39 @@ def github_webhook():
 
     ref = payload.get("ref", "")
     if ref != "refs/heads/master":
+        logger.info(
+            "webhook.github SKIP ref=%s reason=not_master delivery=%s",
+            ref, request.headers.get("X-GitHub-Delivery", ""),
+        )
         return jsonify({"received": True, "ref": ref, "skipped": "not master"}), 200
 
     repo = payload.get("repository") or {}
     repo_name = repo.get("name") or (repo.get("full_name") or "").rsplit("/", 1)[-1]
     slug = repo_name[len("laurel_"):] if repo_name.startswith("laurel_") else ""
     if not slug:
+        logger.info(
+            "webhook.github SKIP repo=%s reason=not_laurel_repo delivery=%s",
+            repo_name, request.headers.get("X-GitHub-Delivery", ""),
+        )
         return jsonify({"received": True, "skipped": "not a laurel repo"}), 200
 
     app = Application.query.filter_by(slug=slug, deleted_at=None).first()
     if app is None:
-        logger.info("webhook github: repo %s no es una app administrada", repo_name)
+        logger.info(
+            "webhook.github SKIP repo=%s slug=%s reason=unknown_app delivery=%s",
+            repo_name, slug, request.headers.get("X-GitHub-Delivery", ""),
+        )
         return jsonify({"received": True, "app": slug, "skipped": "unknown app"}), 200
 
     # La version la decide la UI: si esta vacia por algun motivo (apps
     # creadas antes de la migracion), cae a 0.0.1 para no fallar.
     new_version = (app.current_version or "0.0.1").strip()
     sha = (payload.get("head_commit") or {}).get("id") or payload.get("after") or ""
+    pusher = (payload.get("pusher") or {}).get("name", "")
+    logger.info(
+        "webhook.github ROUTED app=%s slug=%s version=%s sha=%s pusher=%s test_cmd_len=%d",
+        app.id, slug, new_version, sha[:12] if sha else "", pusher, len(app.test_cmd or ""),
+    )
 
     # Propagamos la version a los scoops de la app, para que el deploy
     # use el tag correcto. Best-effort: si falla, no bloqueamos el build.
@@ -106,6 +122,8 @@ def github_webhook():
             {Scoop.version: new_version}, synchronize_session=False
         )
         db.session.commit()
+        logger.info("webhook.github PROPAGATED version=%s to scoops of app=%s",
+                    new_version, app.id)
     except Exception as exc:
         db.session.rollback()
         logger.warning("webhook: no se pudo propagar version a scoops: %s", exc)
@@ -121,12 +139,19 @@ def github_webhook():
             "number": result.get("number"),
             "url": result["url"],
         }
+        logger.info(
+            "webhook.github JENKINS_OK app=%s job=%s number=%s url=%s",
+            app.id, result["job"], result.get("number"), result["url"],
+        )
     except AppError as exc:
         # El webhook no debe fallar porque Jenkins no este listo (job sin crear
         # o token pendiente): se reporta y se devuelve 200. Aun asi creamos
         # el AppBuild con status='pending' para que aparezca en la lista
         # y el operador lo vea y pueda re-dispararlo.
-        logger.warning("jenkins trigger fallo para %s: %s", slug, exc.message)
+        logger.warning(
+            "webhook.github JENKINS_FAIL app=%s slug=%s err=%s",
+            app.id, slug, exc.message,
+        )
         jenkins_info = {"triggered": False, "error": exc.message}
 
     # Creamos el build record (incluso si Jenkins fallo al disparar:
@@ -141,10 +166,19 @@ def github_webhook():
             jenkins_url=jenkins_info.get("url"),
         )
         build_id = build.id
+        logger.info(
+            "webhook.github BUILD_CREATED app=%s build_id=%s version=%s status=%s",
+            app.id, build_id, new_version, build.status,
+        )
     except Exception as exc:
         logger.exception("webhook: no se pudo crear AppBuild: %s", exc)
         build_id = None
 
+    logger.info(
+        "webhook.github DONE app=%s slug=%s build_id=%s triggered=%s delivery=%s",
+        app.id, slug, build_id, jenkins_info.get("triggered"),
+        request.headers.get("X-GitHub-Delivery", ""),
+    )
     return jsonify({
         "received": True,
         "app": slug,

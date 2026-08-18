@@ -37,6 +37,29 @@ spec:
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
+        - name: install-kaniko
+          # Kaniko ejecuta `docker build` sin daemon. Copiamos solo el
+          # binario `/kaniko/executor` a un emptyDir compartido; el
+          # container de Jenkins lo lee desde /usr/local/kaniko/executor.
+          # Tag pinneado para reproducibilidad (`:debug` trae el binario
+          # en /kaniko/executor, a diferencia de `:latest` que requiere
+          # extraerlo del wars).
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Instalando kaniko executor..."
+              cp /kaniko/executor /shared-kaniko/kaniko
+              chmod 0755 /shared-kaniko/kaniko
+              /shared-kaniko/kaniko --version || true
+              echo "Kaniko instalado"
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: kaniko-bin
+              mountPath: /shared-kaniko
       containers:
         - name: jenkins
           image: jenkins/jenkins:2.516.3-lts-jdk21
@@ -73,6 +96,12 @@ spec:
               mountPath: /var/jenkins_home
             - name: init-scripts
               mountPath: /var/jenkins_home/init.groovy.d
+            - name: kaniko-bin
+              mountPath: /usr/local/kaniko
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-cache
+              mountPath: /kaniko-cache
           readinessProbe:
             httpGet:
               # /api/json responde 200 cuando el server esta listo
@@ -103,6 +132,17 @@ spec:
         - name: init-scripts
           configMap:
             name: jenkins-init-scripts
+        - name: kaniko-bin
+          emptyDir: {}
+        - name: workspace
+          # Donde el job clona el repo. emptyDir se pierde cuando el pod
+          # muere: no queremos cache de build en el PV (sino el PVC se
+          # llena rapido). Cada build empieza desde cero.
+          emptyDir: {}
+        - name: kaniko-cache
+          # Cache de layers de kaniko. emptyDir esta bien para empezar;
+          # migrar a PVC si la cache pasa a ser valiosa.
+          emptyDir: {}
 ---
 # Scripts Groovy que corren en el primer arranque (y en cada reinicio
 # si el script es idempotente, que es lo que asumimos aca).
@@ -138,17 +178,19 @@ data:
   #    token en el secreto k8s `laurel-integrations` (key `jenkins-token`).
   #    Este init script solo automatiza el caso demo.
   #
-  #    El job corre un pipeline CI/CD de 3 stages con `set -e`:
+  #    El job corre un pipeline CI/CD real de 3 stages con `set -e`:
+  #      0. git clone del repo (con GITHUB_PAT para repos privados).
   #      1. Unit tests (`eval "$TEST_CMD"`)  -> si falla, no se buildea.
-  #      2. Build image (`docker build -t $IMAGE .`) -> placeholder.
-  #      3. Push image (`docker push $IMAGE`)        -> placeholder.
-  #    TEST_CMD llega del backend (campo applications.test_cmd); si
-  #    llega vacio se usa el default del job (echo "no tests").
+  #      2. Build image con kaniko (`/usr/local/kaniko/executor`).
+  #      3. Push image a GHCR (kaniko lo hace en el mismo paso).
+  #    Kaniko corre como binario copiado por el init container
+  #    `install-kaniko` (no necesita docker daemon en el pod).
   10-bootstrap-jobs.groovy: |
     import jenkins.model.Jenkins
     import hudson.model.FreeStyleProject
     import hudson.model.ParametersDefinitionProperty
     import hudson.model.StringParameterDefinition
+    import hudson.model.PasswordParameterDefinition
     import hudson.tasks.Shell
     import hudson.model.BuildAuthorizationTokenProperty
 
@@ -156,50 +198,79 @@ data:
     def jobName = "laurel_demo"
     def token = "laurel-test-token-2026"
 
-    if (jenkins.getItem(jobName) != null) {
-        println "[init] job ${jobName} ya existe, skip"
-        return
+    // Si el job ya existe de un deploy previo, lo borramos y recreamos
+    // para que tome el pipeline nuevo. Init scripts corren en cada
+    // reinicio del pod, pero la definicion del job queda en el PV y
+    // no se vuelve a aplicar sola.
+    def existing = jenkins.getItem(jobName)
+    if (existing != null) {
+        existing.delete()
+        println "[init] job ${jobName} eliminado para recrear con pipeline real"
     }
 
     def job = jenkins.createProject(FreeStyleProject, jobName)
-    job.description = "Demo build job. Pipeline CI/CD de 3 stages: tests -> build -> push."
+    job.description = "Demo build job. Pipeline CI/CD real: clone -> tests -> kaniko build+push a GHCR."
 
     def params = new ParametersDefinitionProperty([
         new StringParameterDefinition("SLUG", "demo", "slug de la app"),
         new StringParameterDefinition("TAG",  "0.0.1", "tag/version a buildear"),
-        new StringParameterDefinition("REPO", "laurel-applications/laurel_demo", "repo GitHub"),
-        new StringParameterDefinition("IMAGE", "aflobaton/laurel_demo:0.0.1", "imagen Docker destino"),
+        new StringParameterDefinition("REPO", "laurel-applications/laurel_demo", "repo GitHub (owner/name)"),
+        new StringParameterDefinition("IMAGE", "laurel-applications/laurel_demo", "imagen destino SIN registry ni tag (e.g. owner/repo)"),
         new StringParameterDefinition(
             "TEST_CMD", "echo '[demo] no tests configured - placeholder OK'",
             "comando a correr en STAGE 1 (unit tests). Default placeholder; " +
             "para apps reales pasar el comando real (ej 'pytest tests/', 'npm test')."
         ),
+        new PasswordParameterDefinition(
+            "GITHUB_PAT", "placeholder",
+            "GitHub PAT con scope repo + write:packages (para clonar y pushear a GHCR). " +
+            "PasswordParameter es auto-masked en el log de Jenkins."
+        ),
     ])
     job.addProperty(params)
 
-    // Pipeline de 3 stages con `set -e`: si los tests fallan, NO se
-    // intenta buildear. Los steps 2 y 3 son placeholders porque el
-    // pod de Jenkins no tiene docker; un job real debe reemplazar las
-    // lineas marcadas con `would run:` por los comandos reales.
+    // Pipeline real: clone -> tests -> kaniko build+push.
+    // `set -e` corta en cuanto algo falla. kaniko hace build+push
+    // atomico contra ghcr.io (el IMAGE param viene sin registry).
     def shell = new Shell(
         'set -e\n' +
         'echo "========================================="\n' +
+        'echo "STAGE 0/3: Clone repo"\n' +
+        'echo "REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}"\n' +
+        'echo "========================================="\n' +
+        'rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true\n' +
+        'cd /workspace\n' +
+        'if [ -n "${GITHUB_PAT}" ] && [ "${GITHUB_PAT}" != "placeholder" ]; then\n' +
+        '  git clone "https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git" .\n' +
+        'else\n' +
+        '  git clone "https://github.com/${REPO}.git" .\n' +
+        'fi\n' +
+        'git checkout -q "${TAG}" 2>/dev/null || git checkout -q master\n' +
+        'ls -la\n' +
+        'echo "========================================="\n' +
         'echo "STAGE 1/3: Unit tests"\n' +
-        'echo "SLUG=${SLUG}  TAG=${TAG}"\n' +
+        'echo "TEST_CMD: ${TEST_CMD}"\n' +
         'echo "========================================="\n' +
         'eval "${TEST_CMD}"\n' +
         'echo "TESTS OK"\n' +
         'echo "========================================="\n' +
-        'echo "STAGE 2/3: Build image"\n' +
-        'echo "Image: ${IMAGE}"\n' +
+        'echo "STAGE 2/3 + 3/3: Build & push image (kaniko)"\n' +
+        'echo "Destination: ghcr.io/${IMAGE}:${TAG}"\n' +
         'echo "========================================="\n' +
-        'echo "(would run: docker build -t ${IMAGE} .)"\n' +
-        'echo "BUILD OK"\n' +
-        'echo "========================================="\n' +
-        'echo "STAGE 3/3: Push image to registry"\n' +
-        'echo "========================================="\n' +
-        'echo "(would run: docker push ${IMAGE})"\n' +
-        'echo "PUSH OK"\n' +
+        'export DOCKER_CONFIG=/workspace/.docker\n' +
+        'mkdir -p "$DOCKER_CONFIG"\n' +
+        'if [ -n "${GITHUB_PAT}" ] && [ "${GITHUB_PAT}" != "placeholder" ]; then\n' +
+        '  AUTH=$(printf "x-access-token:%s" "${GITHUB_PAT}" | base64 -w 0)\n' +
+        '  printf \'{"auths":{"ghcr.io":{"auth":"%s"}}}\\n\' "$AUTH" > "$DOCKER_CONFIG/config.json"\n' +
+        'fi\n' +
+        '/usr/local/kaniko/executor \\\n' +
+        '  --context=/workspace \\\n' +
+        '  --dockerfile=Dockerfile \\\n' +
+        '  --destination="ghcr.io/${IMAGE}:${TAG}" \\\n' +
+        '  --cache=true \\\n' +
+        '  --cache-repo="ghcr.io/laurel-applications/kaniko-cache" \\\n' +
+        '  --snapshot-mode=time\n' +
+        'echo "BUILD+PUSH OK"\n' +
         'echo "PIPELINE COMPLETE"\n' +
         'exit 0\n'
     )

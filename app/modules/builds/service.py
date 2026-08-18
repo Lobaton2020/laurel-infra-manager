@@ -63,6 +63,10 @@ class BuildsService:
         no debe romperse porque Jenkins tenga un blip.
         """
         from app.modules.apps.model import Application  # noqa: F401
+        logger.info(
+            "builds.poll START build_id=%s job=%s number=%s current_status=%s",
+            build.id, build.jenkins_job, build.jenkins_number, build.status,
+        )
         try:
             status = JenkinsService.get_build_status(
                 # jenkins_job es `laurel_<slug>`; el service agrega el prefix,
@@ -72,14 +76,19 @@ class BuildsService:
             )
         except AppError as exc:
             logger.warning(
-                "build poll fallo (build_id=%s, job=%s, n=%s): %s",
+                "builds.poll FAIL build_id=%s job=%s n=%s err=%s",
                 build.id, build.jenkins_job, build.jenkins_number, exc.message,
             )
             return
 
+        old_status = build.status
         new_status = status["status"]
         if new_status == build.status and build.started_at and status.get("timestamp"):
             # Sin cambio de estado, no reseteamos started_at.
+            logger.info(
+                "builds.poll NOOP build_id=%s status_unchanged=%s",
+                build.id, new_status,
+            )
             return
         if new_status != "pending" and build.started_at is None and status.get("timestamp"):
             build.started_at = datetime.fromtimestamp(status["timestamp"] / 1000)
@@ -93,6 +102,10 @@ class BuildsService:
                 )
         build.status = new_status
         db.session.commit()
+        logger.info(
+            "builds.poll TRANSITION build_id=%s %s -> %s",
+            build.id, old_status, new_status,
+        )
 
     @staticmethod
     def create_pending(
@@ -117,6 +130,12 @@ class BuildsService:
         )
         db.session.add(build)
         db.session.commit()
+        logger.info(
+            "builds.create_pending id=%s app_id=%s version=%s commit=%s "
+            "jenkins_job=%s jenkins_number=%s jenkins_url=%s",
+            build.id, app_id, version,
+            (commit_sha or "")[:12], jenkins_job, jenkins_number, jenkins_url,
+        )
         return build
 
     @staticmethod
