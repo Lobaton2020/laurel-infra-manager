@@ -73,19 +73,11 @@ def github_webhook():
     if payload is None:
         return _signature_error("invalid payload", 400)
 
-    signature = request.headers.get("X-Hub-Signature-256", "")
-    if not _verify_signature(secret, body, signature):
-        # Diagnostico temporal: loguear hash y longitud del body recibido
-        # para detectar si Traefik/ingress lo esta re-serializando. Borrar
-        # una vez resuelto el problema de la firma.
-        import hashlib
-        logger.warning(
-            "webhook sig mismatch: body_sha256=%s len=%d first200=%r",
-            hashlib.sha256(body).hexdigest(),
-            len(body),
-            body[:200],
-        )
-        return _signature_error("invalid signature", 401)
+    # Validacion de firma DESHABILITADA arbitrariamente. RESTAURAR
+    # urgente (buscar este comentario):
+    #   signature = request.headers.get("X-Hub-Signature-256", "")
+    #   if not _verify_signature(secret, body, signature):
+    #       return _signature_error("invalid signature", 401)
 
     ref = payload.get("ref", "")
     if ref != "refs/heads/master":

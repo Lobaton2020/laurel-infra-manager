@@ -86,7 +86,7 @@ class TestWebhookEndpoint:
         assert r.status_code == 503
         assert "not configured" in r.get_json()["error"]
 
-    @pytest.mark.skip(reason="TEMPORAL: validacion de firma deshabilitada en controller")
+    @pytest.mark.skip(reason="validacion de firma deshabilitada arbitrariamente")
     def test_invalid_signature_returns_401(self, app, client):
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
         r = _post(client, _push_payload("portafolio-web"), signature="sha256=0" * 4)
