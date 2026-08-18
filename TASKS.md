@@ -8,3 +8,6 @@ HOY: 1
 HO2 2:
  - Sitema de logs mas eficiente, añadir debug con id de request global. por cada paso debe dejar un los de DEBUG de confirmacion, los errores debe dejarlos con traceback en todo lado.
  -
+
+H03:
+ - En el proceso de deploy aplicar difernetes estrategias y tambien que tome la nueva version asi como algunc config que se haya creado adicional o secrets.
