@@ -51,6 +51,15 @@ def github_webhook():
     if not secret:
         return _signature_error("webhook secret not configured", 503)
 
+    # Debug temporal: loguear los primeros 10 chars del secret + longitud,
+    # para verificar que el valor que llega al backend coincide con el que
+    # GitHub tiene configurado. BORRAR una vez resuelto el problema de firma.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "DEBUG webhook secret: prefix=%r len=%d",
+        secret[:10], len(secret),
+    )
+
     # Leer el body crudo ANTES de consumir el stream con get_json()
     body = request.get_data()
 
@@ -66,6 +75,16 @@ def github_webhook():
 
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not _verify_signature(secret, body, signature):
+        # Diagnostico temporal: loguear hash y longitud del body recibido
+        # para detectar si Traefik/ingress lo esta re-serializando. Borrar
+        # una vez resuelto el problema de la firma.
+        import hashlib
+        logger.warning(
+            "webhook sig mismatch: body_sha256=%s len=%d first200=%r",
+            hashlib.sha256(body).hexdigest(),
+            len(body),
+            body[:200],
+        )
         return _signature_error("invalid signature", 401)
 
     ref = payload.get("ref", "")
