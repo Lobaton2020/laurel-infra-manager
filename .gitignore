@@ -25,5 +25,5 @@ kubeconfig*
 # Herramientas locales de desarrollo / indexado
 .codegraph/
 .opencode/
-
+mvp
 # Frontend (ahora vive en configurator-lob/frontend, repositorio aparte)

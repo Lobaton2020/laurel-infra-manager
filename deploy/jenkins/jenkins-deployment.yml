@@ -50,7 +50,15 @@ spec:
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
-        - name: install-kaniko
+        # Estrategia de build: kaniko (primario). El init container copia
+        # el binario desde gcr.io/kaniko-project/executor:v1.23.2-debug y
+        # monta /kaniko (emptyDir kaniko-work) como staging dir escribible.
+        #
+        # Podman NO esta disponible en esta imagen (jenkins/jenkins oficial)
+        # y no es viable instalarlo via `kubectl apply` (los init containers
+        # no pueden escribir al rootfs del container principal). Si en el
+        # futuro se quiere podman como fallback en el cluster, hay que
+        # build una imagen custom con podman o usar un sidecar container.
           # Kaniko ejecuta `docker build` sin daemon. Copiamos el binario
           # `/kaniko/executor` del image `:debug` (que lo trae ya extraido,
           # a diferencia de `:latest` que requiere sacarlo de wars) a un
@@ -203,10 +211,10 @@ kind: ConfigMap
 metadata:
   name: jenkins-init-scripts
 data:
-  # Deshabilita CSRF y deja la auth como UNSECURED.
-  # El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
-  # get_build_status) y POSTs con ?token=<build_token> a
-  # /job/<job>/buildWithParameters. Ninguno requiere login.
+  # 1) Deshabilita CSRF y deja la auth como UNSECURED.
+  #    El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
+  #    get_build_status) y POSTs con ?token=<build_token> a
+  #    /job/<job>/buildWithParameters. Ninguno requiere login.
   00-security.groovy: |
     import jenkins.model.Jenkins
     import hudson.security.AuthorizationStrategy
@@ -221,6 +229,59 @@ data:
     }
     instance.save()
     println "[init] Security: UNSECURED + crumb OFF"
+
+  # 2) Asegura que los plugins Multibranch estan instalados en cada arranque.
+  #    La imagen oficial jenkins/jenkins:2.516.3 NO trae los plugins de
+  #    multibranch instalados -> los instalamos via Update Center
+  #    (dynamicLoad=true evita reinicio).
+  #    ESTO ES AGNOSTICO A PROYECTOS: solo instala los plugins compartidos.
+  #    La creacion de jobs Multibranch es responsabilidad de cada proyecto/operador.
+  20-install-multibranch-plugins.groovy: |
+    import jenkins.install.Installable
+    import jenkins.model.Jenkins
+    import jenkins.model.UpdateCenter
+
+    def log = { println("[init-mb] " + it) }
+
+    // Plugins esenciales para Multibranch / Workflow (solo nombres, sin referencia a repo/Job).
+    def PLUGINS = [
+        "workflow-multibranch",
+        "workflow-job",
+        "workflow-cps",
+        "workflow-step-api",
+        "branch-api",
+        "pipeline-stage-view",
+        "pipeline-graph-analysis",
+        "git",
+        "scm-api",
+        "script-security",
+        "workflow-support",
+    ]
+    def site = Jenkins.instance.updateCenter.getById("default")
+    def pending = []
+    PLUGINS.each { name ->
+        def p = site?.getPlugin(name)
+        if (p == null) {
+            log("WARN plugin '" + name + "' no esta en el Update Center")
+            return
+        }
+        if (p.getInstalled() != null) { return } // ya instalado
+        log("instalando plugin " + name + " ...")
+        pending << p.install(true)
+    }
+    pending.each { inst ->
+        def n = inst.plugin.name
+        log("esperando instalacion de " + n + " ...")
+        def timeoutMs = 180000
+        def elapsed = 0
+        while (inst.status != Installable.InstallationStatus.COMPLETED &&
+               inst.status != Installable.InstallationStatus.FAILED &&
+               elapsed < timeoutMs) {
+            Thread.sleep(3000); elapsed += 3000
+        }
+        log("  " + n + " -> " + inst.status)
+    }
+    log("[init-mb] Todos los plugins Multibranch asegurados. Prosiga a crear jobs por proyecto.")
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
