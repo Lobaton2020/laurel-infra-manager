@@ -18,4 +18,12 @@ H04:
 - Aplicar la seguridad entre github y mi app
 - Apliar seguridad entre jenkins y mi app
 - Aplicar seguridad en jenkins para no enviar credenciales en peticion http sino que esten en jenkins, credenciales de docker hub y github
-- Al cosultar estado del deployment, debe validar para que tome el id correco del deploy, por que no es igual sl id de la applicacion. atualmente esta mal.
+- Al consultar estado del deployment, validar que se tome el id correcto del deploy (no es el mismo que el id de la aplicación). Actualmente en _poll_one: si jenkins_url está obsoleto o es incorrecto, el polling devuelve status erroneo. El back-end debe validar con Jenkins y Docker Hub antes de reportar al front-end.
+  Investigación en curso: _poll_one en app/modules/builds/service.py usa build.jenkins_job para derivar slug y build.jenkins_url para query. Necesita validación de que la URL sea la correcta y no se confunda con application_id.
+
+H05:
+ - EN el front al momento de crear un nuevo secrets asociado a una app, recuerda que en el estado global ya tienes la app seleccionada por lo que el form es inncesario del application, y el de namespace cada app crea un namespaces internamente por lo que tambien es innecesario ese campo,
+ - Permite unicamente desde el front poder importar un archivo .env y autollenar ciertas campos de formulario, hazme preguntas
+ - Igual en configmaps,
+ - Recuerda que estos 2 recursos de kubernetes se deben crear tal cual con los servicios respectivos.
+ - Importante cuando se quiera editar, no debe mostrar valores reales de las credenciales, es decir ocultas, con un boton a la derecha para verlas, solo en los secrets.

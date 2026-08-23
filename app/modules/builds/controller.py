@@ -48,7 +48,7 @@ def list_builds(app_id: int):
         # Polling on-demand: un GET por build en estado vivo.
         # Limite simple: si hay N running, son N llamadas a Jenkins.
         # Aceptable para MVP; si crece, mover a un poller en background.
-        if poll and b.status in ("pending", "running") and b.jenkins_number:
+        if poll and b.status in ("pending", "running") and b.jenkins_url:
             BuildsService.get(app_id, b.id, poll=True)
         items.append(b.to_dict())
     return jsonify({"items": items})
