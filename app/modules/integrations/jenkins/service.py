@@ -605,20 +605,31 @@ class JenkinsService:
                     echo "STAGE Clone: ${REPO} (tag ${TAG})"
                     echo "=========================================="
                     cd ${WORKSPACE}
-                    rm -rf ${WORKSPACE}/* ${WORKSPACE}/.git ${WORKSPACE}/.[!.]* 2>/dev/null || true
-                    # Repos publicos: clone sin auth. Si en el futuro se
-                    # necesitan repos privados, agregar GITHUB_PAT como
-                    # PasswordParameter en el job y volver al condicional.
-                    git clone "https://github.com/${REPO}.git" .
+                    # git >= 2.35.2 detecta "dubious ownership" cuando el
+                    # .git/ lo creo un user (root dentro del container)
+                    # distinto del user del job (jenkins, UID 1000).
+                    # Marcamos el workspace como seguro para evitar el
+                    # "fatal: detected dubious ownership" que aborta el
+                    # clone antes del checkout.
+                    git config --global --add safe.directory '*'
+                    # Limpieza agresiva: rm no matchea bien archivos con
+                    # caracteres especiales ni symlinks. Usamos find.
+                    echo "[cleanup] borrando contenido de ${WORKSPACE} ..."
+                    find "${WORKSPACE}" -mindepth 1 -delete 2>/dev/null || true
+                    # Timeout 120s: si GitHub no responde (red, firewall,
+                    # DNS del pod), git muere con exit 124 y propagamos
+                    # error claro en vez de quedar colgados.
+                    timeout 120 git clone --depth 1 "https://github.com/${REPO}.git" .
                     if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
                         echo "ERROR: el repo ${REPO} no tiene commits en la default branch. Haz un push inicial antes de disparar el build." >&2
                         exit 2
                     fi
                     if [ -n "${TAG}" ] && git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
-                        echo "Checkout tag ${TAG}"
+                        echo "WARN: --depth 1 no trae tags remotos; bajando el tag ${TAG} especificamente"
+                        timeout 60 git fetch --depth 1 origin tag "${TAG}"
                         git checkout -q "${TAG}"
                     else
-                        echo "WARN: tag ${TAG} no existe en el repo; usando HEAD"
+                        echo "WARN: tag ${TAG} no existe en el repo; usando HEAD (default branch)"
                         git checkout -q HEAD
                     fi
                     ls -la
