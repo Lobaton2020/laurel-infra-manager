@@ -30,6 +30,8 @@ spec:
       # Jenkins corre como uid 1000 dentro del contenedor y necesita
       # poder escribir en el volumen. Si el PV ya esta creado con otro
       # owner, el initContainer de fix-permissions lo corrige.
+      # El container principal agrega capabilities CHOWN para que kaniko
+      # pueda resetear ownership de archivos en /kaniko durante el build.
       securityContext:
         fsGroup: 1000
       initContainers:
@@ -95,11 +97,19 @@ spec:
           image: jenkins/jenkins:2.516.3-lts-jdk21
           imagePullPolicy: IfNotPresent
           securityContext:
+            # Jenkins corre como uid 1000 por diseno de la imagen oficial.
+            # PERO kaniko (al hacer chown del Dockerfile a root durante el
+            # build) necesita CAP_CHOWN. Sin esa cap, falla con:
+            #   "chown /kaniko/Dockerfile: operation not permitted"
+            # Agregamos solo la cap minima necesaria; NO subimos a root.
             runAsUser: 1000
             runAsGroup: 1000
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
+            capabilities:
+              add:
+                - CHOWN
           ports:
             - containerPort: 8080
               name: http
