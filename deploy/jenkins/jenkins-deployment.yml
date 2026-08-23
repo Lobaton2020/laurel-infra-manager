@@ -259,8 +259,21 @@ data:
 
     def log = { println("[init-mb] " + it) }
 
-    // Plugins esenciales para Multibranch / Workflow (solo nombres, sin referencia a repo/Job).
+    // Plugins esenciales para Multibranch / Workflow / Blue Ocean
+    // (solo nombres, sin referencia a repo/Job).
+    //
+    // Blue Ocean provee la UI moderna con visualizacion de pipeline
+    // como cajas con logs abajo. Para que funcione, instalamos:
+    //   - blueocean: el plugin principal
+    //   - blueocean-pipeline-api / blueocean-rest / blueocean-rest-impl / blueocean-web
+    //   - blueocean-commons / blueocean-config / blueocean-dashboard
+    //   - blueocean-jwt / blueocean-personalization / blueocean-display-url
+    //   - blueocean-github-pipeline (si queres integracion con GH)
+    //
+    // Si solo vas a usar la UI clasica o la nueva UI built-in de Jenkins,
+    // podes comentar el bloque BLUE_OCEAN abajo para ahorrar tiempo de boot.
     def PLUGINS = [
+        // --- Multibranch / Pipeline core ---
         "workflow-multibranch",
         "workflow-job",
         "workflow-cps",
@@ -272,6 +285,22 @@ data:
         "scm-api",
         "script-security",
         "workflow-support",
+
+        // --- Blue Ocean UI ---
+        "blueocean",
+        "blueocean-commons",
+        "blueocean-rest",
+        "blueocean-rest-impl",
+        "blueocean-web",
+        "blueocean-pipeline-api",
+        "blueocean-pipeline-editor",
+        "blueocean-dashboard",
+        "blueocean-jwt",
+        "blueocean-personalization",
+        "blueocean-config",
+        "blueocean-display-url",
+        "blueocean-i18n",
+        "blueocean-github-pipeline",
     ]
     def site = Jenkins.instance.updateCenter.getById("default")
     def pending = []
@@ -297,7 +326,8 @@ data:
         }
         log("  " + n + " -> " + inst.status)
     }
-    log("[init-mb] Todos los plugins Multibranch asegurados. Prosiga a crear jobs por proyecto.")
+    log("[init-mb] Todos los plugins (Multibranch + Blue Ocean) asegurados. Prosiga a crear jobs por proyecto.")
+    log("[init-mb] Blue Ocean UI disponible en: ${Jenkins.instance.rootUrl}blue")
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
