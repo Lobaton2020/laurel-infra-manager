@@ -229,25 +229,27 @@ class AppsService:
         if app.status != "error":
             app.status = "ok" if events else "ok"
 
-        # Step 5: crear el job `laurel_<slug>` en Jenkins con el pipeline
-        # CI/CD de 3 stages (tests -> build -> push). Solo lo creamos
-        # (NO lo disparamos): un push a master lo hara despues via el
-        # webhook. Si falla, hacemos rollback completo: el INSERT de la
-        # app todavia no esta commiteado (solo flushed), asi que
-        # session.rollback() lo deshace; ademas limpiamos namespace y
-        # GH repo si llegaron a crearse.
+        # Step 5: asegurar la config del job `laurel_<slug>` en Jenkins
+        # como pipeline declarativo de 4 stages (Init -> Clone -> Test
+        # autodetect -> Build+Push con kaniko). `ensure_job_config` es
+        # idempotente: si el job no existe, lo crea; si existe (con
+        # formato viejo o nuevo), lo borra y lo regenera. NO dispara
+        # builds: eso es responsabilidad exclusiva del webhook via
+        # `trigger_build`. Si falla, hacemos rollback completo: el
+        # INSERT de la app todavia no esta commiteado (solo flushed),
+        # asi que session.rollback() lo deshace; ademas limpiamos
+        # namespace y GH repo si llegaron a crearse.
         from app.modules.integrations.jenkins.service import JenkinsService
         try:
-            JenkinsService.create_job(
+            JenkinsService.ensure_job_config(
                 slug=slug,
-                test_cmd=app.test_cmd,
                 image_base=app.docker_image_base,
                 github_repo_url=app.github_repo_url,
             )
             created_jenkins_job = True
             events.append((
                 "jenkins_job", "ok",
-                f"Job Jenkins laurel_{slug} creado con pipeline tests->build->push",
+                f"Job Jenkins laurel_{slug} creado/refrescado con pipeline Init->Clone->Test->Build+Push",
             ))
         except AppError as exc:
             logger.warning("jenkins_job_failed para %s: %s", slug, exc.message)

@@ -107,7 +107,7 @@ class TestListBuilds:
             json={"version": "1.0.0"},
         )
 
-        def _fake_trigger(slug, tag, test_cmd=None):
+        def _fake_trigger(slug, tag):
             return {
                 "job": f"laurel_{slug}",
                 "number": 5,
@@ -149,7 +149,7 @@ class TestGetBuild:
 
         monkeypatch.setattr(
             JenkinsService, "trigger_build",
-            lambda slug, tag, test_cmd=None: {"job": f"laurel_{slug}", "number": 9, "url": "http://x"},
+            lambda slug, tag: {"job": f"laurel_{slug}", "number": 9, "url": "http://x"},
         )
         r = _post_signed(client, _push_payload("notas"))
         assert r.status_code == 200

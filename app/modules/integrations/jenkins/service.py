@@ -123,24 +123,37 @@ class JenkinsService:
             return ""
 
     @staticmethod
-    def trigger_build(slug: str, tag: str, test_cmd: str | None = None) -> dict:
+    def trigger_build(slug: str, tag: str) -> dict:
         """Dispara el build remoto de `laurel_<slug>` con `tag`.
 
-        El job de Jenkins corre un pipeline real de 3 stages (clone ->
-        tests -> kaniko build+push) con `set -e`, por lo que si el TEST_CMD
-        falla, no se intenta buildear la imagen. El operador configura
-        `test_cmd` por app (default en el model: `echo 'no tests
-        configured'`); si llega vacio o None, se manda un placeholder para
-        que Jenkins no falle por param faltante.
+        Este metodo SOLO EJECUTA el build. NO crea ni modifica la
+        definicion del job en Jenkins: eso es responsabilidad de
+        `ensure_job_config`, que `AppsService.create` llama al dar de
+        alta la app. Asumimos que el job ya existe; si no, Jenkins
+        responde 404 y propagamos `AppError(404)`.
 
-        Ademas del test_cmd, inyectamos las credenciales de Docker Hub del
-        backend (system secret `docker_pat` o env vars
-        `DOCKERHUB_USER`/`DOCKERHUB_PASSWORD`) como build parameters
-        PasswordParameter (auto-masked en logs). El job las usa para
-        `docker login` en docker.io via kaniko. El `git clone` de repos
-        privados de GitHub sigue usando `GITHUB_PAT` como env en el pod.
-        Si no hay credenciales de Docker Hub, llegan como `placeholder`
-        y el job cae al path sin auth (repo publico de solo-lectura).
+        Separacion (patron del MVP en `./mvp/jenkins/pipeline.py`):
+          - `ensure_job_config`  -> toca config.xml (idempotente)
+          - `trigger_build`       -> POST /buildWithParameters (ejecuta)
+
+        El job de Jenkins es un pipeline declarativo de 4 stages (Init ->
+        Clone -> Test -> Build+Push) generado por `ensure_job_config`. El
+        Test stage autodetecta el framework del repo clonado; si no hay
+        tests, el stage sale con exit 0 (no rompe el build).
+
+        Parametros enviados al job:
+          - TAG (string): la version a buildear (auto-increment desde Docker
+            Hub tags, calculada por el webhook).
+          - REPO (string): `owner/name` del repo GitHub.
+          - IMAGE (string): `owner/repo` sin registry ni tag (lo completa
+            el pipeline con `docker.io/${IMAGE}:${TAG}`).
+          - GITHUB_PAT (PasswordParameter, masked): para git clone de
+            repos privados. Llega como `placeholder` si no esta
+            configurado.
+          - DOCKERHUB_USER / DOCKERHUB_PASSWORD (PasswordParameter,
+            masked): credenciales de Docker Hub para el push via kaniko.
+            Llegan como `placeholder` si no estan configuradas; el job
+            cae al path sin auth (repo publico de solo-lectura).
 
         Auth por Jenkins build token (trigger remoto): el token va en el
         query param. Returns `{"job", "number", "url"}` donde `url` es
@@ -159,14 +172,8 @@ class JenkinsService:
         base = JenkinsService._base_url()
         url = f"{base}/job/{job}/buildWithParameters"
 
-        # Si test_cmd viene vacio o None, mandamos un placeholder seguro.
-        # Jenkins lo corre con `set -e` + `eval`, asi que cualquier string
-        # que termine con exit 0 sirve. El operador deberia haberlo
-        # configurado a algo real (pytest, npm test, etc).
-        test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
-
         # GITHUB_PAT: para `git clone` de repos privados (el job lo usa en
-        # STAGE 0). Lo leemos igual que github/service.py (env primero,
+        # STAGE Clone). Lo leemos igual que github/service.py (env primero,
         # fallback al system secret `github_pat`).
         github_pat = ""
         try:
@@ -177,7 +184,6 @@ class JenkinsService:
 
         # Credenciales de Docker Hub: mismas fuentes que docker/service.py
         # (env primero, fallback al system secret `docker_pat`).
-        # El job las necesita para hacer docker login y pushear a docker.io.
         dockerhub_user = ""
         dockerhub_pass = ""
         try:
@@ -206,9 +212,6 @@ class JenkinsService:
         # haber puesto `docker.io/owner/repo:tag` en docker_image_base;
         # limpiamos.
         image_no_registry = job
-        # Leemos el image_base real del modelo para soportar overrides
-        # (operator pone otro registry/owner). Si la app no existe o el
-        # lookup falla, caemos al default `laurel_<slug>`.
         try:
             from app.modules.apps.model import Application as _App
             from app.core.db import db as _db
@@ -229,9 +232,8 @@ class JenkinsService:
             )
 
         logger.info(
-            "jenkins.trigger_build START slug=%s tag=%s test_cmd_len=%d "
-            "image=%s has_dockerhub=%s url=%s",
-            slug, tag, len(test_cmd), image_no_registry,
+            "jenkins.trigger_build START slug=%s tag=%s image=%s has_dockerhub=%s url=%s",
+            slug, tag, image_no_registry,
             bool(dockerhub_user and dockerhub_pass), url,
         )
 
@@ -244,11 +246,9 @@ class JenkinsService:
                 url,
                 params={"token": token},
                 data={
-                    "SLUG": slug,
                     "TAG": tag,
                     "REPO": f"laurel-applications/{job}",
                     "IMAGE": image_no_registry,
-                    "TEST_CMD": test_cmd,
                     # PasswordParameters en el job: Jenkins los enmascara
                     # en el log del build. Viajan en el body del POST
                     # (form-encoded), NO en la URL.
@@ -312,33 +312,37 @@ class JenkinsService:
         )
 
     @staticmethod
-    def create_job(
+    def ensure_job_config(
         slug: str,
-        test_cmd: str,
         image_base: str,
         github_repo_url: str | None = None,
     ) -> bool:
-        """Crea el job `laurel_<slug>` en Jenkins con el pipeline CI/CD
-        de 3 stages (tests -> build -> push, con `set -e`).
+        """Asegura que el job `laurel_<slug>` exista en Jenkins con la config
+        actual (Pipeline declarativo de 4 stages: Init -> Clone -> Test ->
+        Build+Push). Idempotente: si ya existe, lo BORRA y lo RECREA con
+        el XML nuevo (asi un job creado con codigo viejo se actualiza
+        al pipeline nuevo automaticamente).
 
-        Llamado por `AppsService.create` cuando el operador da de alta una
-        app: asi el job existe apenas el backend queda operativo y un
-        push a master puede disparar el build sin intervencion manual.
+        Llamado por `AppsService.create` cuando el operador da de alta
+        una app. Tambien puede llamarse manualmente desde un endpoint
+        admin para refrescar la config de un job viejo al nuevo formato
+        sin recrear la app (migracion).
+
+        Conceptualmente separado de `trigger_build`: este metodo solo
+        toca la DEFINICION del job en Jenkins (config.xml). No dispara
+        builds. `trigger_build` solo lanza builds; asume que el job ya
+        existe y NO lo crea ni lo modifica.
 
         Parametros:
             slug: slug de la app (DNS-1123). El job se llamara `laurel_<slug>`.
-            test_cmd: comando de STAGE 1 (tests). Si llega vacio, se usa el
-                placeholder del model ("echo no tests configured").
             image_base: nombre base de la imagen (ej `aflobaton/laurel_notas`).
-                El job default tag es `0.0.1`; el webhook lo overridea con
-                `app.current_version` cuando dispara el build.
+                Se sanitiza a `owner/repo` sin registry ni tag; el pipeline
+                lo completa con `docker.io/${IMAGE}:${TAG}`.
             github_repo_url: URL al repo GitHub. Solo se usa para construir
                 el parametro REPO del job (informativo para el pipeline).
 
-        Returns True si el job fue creado, False si ya existia
-        (idempotente: AppsService.create puede llamarse en retry).
-        Raises AppError si Jenkins responde algo distinto de 200/201/409
-        o si la red se cae.
+        Returns True si el job quedo creado/refrescado, False si fallo
+        (logueado). Raises AppError si Jenkins no responde a tiempo.
         """
         _validate_slug(slug)
         token = _get_build_token()
@@ -350,19 +354,14 @@ class JenkinsService:
         # Repo: si el operador lo dio, usamos la parte del path; si no, el
         # default `laurel-applications/laurel_<slug>`.
         if github_repo_url:
-            # "https://github.com/owner/repo" -> "owner/repo"
             parts = github_repo_url.rstrip("/").split("/")
             repo = "/".join(parts[-2:]) if len(parts) >= 2 else f"laurel-applications/{job}"
         else:
             repo = f"laurel-applications/{job}"
 
-        # test_cmd vacio -> placeholder. Mismo criterio que trigger_build.
-        test_cmd = (test_cmd or "").strip() or "echo '[no test_cmd configured]'"
-
         # image_base puede llegar con tag (ej 'ghcr.io/owner/repo:0.0.1' o
         # 'owner/repo:0.0.1'); el pipeline espera SIN tag + SIN registry
-        # porque lo completa con `ghcr.io/${IMAGE}:${TAG}`.
-        # Si el operador ya puso el registry adelante, lo sacamos.
+        # porque lo completa con `docker.io/${IMAGE}:${TAG}`.
         if "/" in image_base:
             parts = image_base.split("/")
             image_no_registry = "/".join(parts[-2:]) if len(parts) >= 2 else image_base
@@ -370,28 +369,31 @@ class JenkinsService:
             image_no_registry = image_base
         image_no_registry = image_no_registry.split(":")[0]
 
-        # XML de la config. Pipeline real de 3 stages con set -e:
-        # 0. git clone (con GITHUB_PAT si llega en el trigger).
-        # 1. unit tests (eval $TEST_CMD) -> falla, corta antes del build.
-        # 2+3. kaniko build + push a docker.io (atomico, sin docker daemon).
-        # El `IMAGE` parametro es `owner/repo` sin registry/tag; el job
-        # agrega `docker.io/` y `:${TAG}`. `DOCKERHUB_USER` /
-        # `DOCKERHUB_PASSWORD` y `GITHUB_PAT` son PasswordParameters
-        # auto-masked en logs.
+        # Groovy pipeline (CpsFlowDefinition). Sandbox=true: corre seguro,
+        # sin acceso a Jenkins internals. Las PasswordParameters (GITHUB_PAT,
+        # DOCKERHUB_USER, DOCKERHUB_PASSWORD) son auto-masked en logs por
+        # Jenkins.
+        groovy_script = JenkinsService._build_pipeline_groovy()
+        # xml.sax.saxutils no estaba importado arriba; usamos un escape
+        # inline minimo (& -> &amp; y " -> &quot;) para no traer otra dep.
+        # El script Groovy no deberia contener estos caracteres problematicos
+        # en practica, pero el escape es defensivo.
+        from xml.sax.saxutils import escape as _xml_escape
+        groovy_escaped = _xml_escape(groovy_script, {'"': "&quot;"})
+
         xml = (
             "<?xml version='1.0' encoding='UTF-8'?>\n"
-            "<project>\n"
-            f"  <description>Job para {job}. Pipeline CI/CD real: clone -> tests -> kaniko build+push a Docker Hub. "
-            "Creado por AppsService.create.</description>\n"
+            '<flow-definition plugin="workflow-job@2.40">\n'
+            f'  <description>Job para {job}. Pipeline CI/CD declarativo (Blue Ocean): '
+            'Init -> Clone -> Test (autodetect) -> Build+Push (kaniko). '
+            'Creado por AppsService.create.</description>\n'
             "  <keepDependencies>false</keepDependencies>\n"
             "  <properties>\n"
             "    <hudson.model.ParametersDefinitionProperty>\n"
             "      <parameterDefinitions>\n"
-            f"        <hudson.model.StringParameterDefinition><name>SLUG</name><defaultValue>{slug}</defaultValue><description>slug de la app</description></hudson.model.StringParameterDefinition>\n"
-            f"        <hudson.model.StringParameterDefinition><name>TAG</name><defaultValue>0.0.1</defaultValue><description>tag/version a buildear</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>TAG</name><defaultValue>0.0.1</defaultValue><description>tag/version a buildear (auto-increment calculado por el webhook desde Docker Hub tags)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub (owner/name)</description></hudson.model.StringParameterDefinition>\n"
-            f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_no_registry}</defaultValue><description>imagen destino SIN registry ni tag (e.g. owner/repo)</description></hudson.model.StringParameterDefinition>\n"
-            f"        <hudson.model.StringParameterDefinition><name>TEST_CMD</name><defaultValue>{test_cmd}</defaultValue><description>comando a correr en STAGE 1 (unit tests)</description></hudson.model.StringParameterDefinition>\n"
+            f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_no_registry}</defaultValue><description>imagen destino SIN registry ni tag (e.g. owner/repo). El pipeline agrega docker.io/ y :${{TAG}}</description></hudson.model.StringParameterDefinition>\n"
             "        <hudson.model.PasswordParameterDefinition><name>GITHUB_PAT</name><defaultValue>placeholder</defaultValue><description>GitHub PAT para git clone de repos privados. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_USER</name><defaultValue>placeholder</defaultValue><description>User de Docker Hub (namespace del repo). Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_PASSWORD</name><defaultValue>placeholder</defaultValue><description>Password/token de Docker Hub para push a docker.io. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
@@ -401,93 +403,13 @@ class JenkinsService:
             f"      <authToken>{token}</authToken>\n"
             "    </hudson.model.BuildAuthorizationTokenProperty>\n"
             "  </properties>\n"
-            "  <scm class=\"hudson.scm.NullSCM\"/>\n"
-            "  <canRoam>true</canRoam>\n"
-            "  <disabled>false</disabled>\n"
-            "  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>\n"
-            "  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>\n"
+            '  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" '
+            'plugin="workflow-cps@2.94">\n'
+            f"    <script>{groovy_escaped}</script>\n"
+            "    <sandbox>true</sandbox>\n"
+            "  </definition>\n"
             "  <triggers/>\n"
-            "  <concurrentBuild>false</concurrentBuild>\n"
-            "  <builders>\n"
-            "    <hudson.tasks.Shell>\n"
-            "      <command>set -e\n"
-            "echo &quot;=========================================&quot;\n"
-            "echo &quot;STAGE 0/3: Clone repo&quot;\n"
-            "echo &quot;REPO=${REPO}  TAG=${TAG}  IMAGE=${IMAGE}&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            # Usamos $WORKSPACE (env var que Jenkins setea al workspace
-            # del job) en vez de /workspace hardcoded: asi funciona tanto
-            # en el cluster (workspace root por defecto) como en el
-            # Jenkins local (cuyo workspace base es distinto).
-            "rm -rf ${WORKSPACE}/* ${WORKSPACE}/.git ${WORKSPACE}/.[!.]* 2&gt;/dev/null || true\n"
-            "cd ${WORKSPACE}\n"
-            "if [ -n &quot;${GITHUB_PAT}&quot; ] &amp;&amp; [ &quot;${GITHUB_PAT}&quot; != &quot;placeholder&quot; ]; then\n"
-            "  git clone &quot;https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git&quot; .\n"
-            "else\n"
-            "  git clone &quot;https://github.com/${REPO}.git&quot; .\n"
-            "fi\n"
-            # Si el repo esta vacio (sin commits), falla con mensaje claro.
-            "if ! git rev-parse --verify HEAD &gt;/dev/null 2&gt;&amp;1; then\n"
-            "  echo &quot;ERROR: el repo ${REPO} esta vacio. Haz un push inicial a master antes de disparar el build.&quot; &gt;&amp;2\n"
-            "  exit 2\n"
-            "fi\n"
-            # Tag si existe; si no, HEAD (la default branch que ya clono
-            # git clone). Usamos HEAD en vez de 'master' hardcoded para
-            # soportar repos con default branch distinto (main, develop, etc).
-            "if [ -n &quot;${TAG}&quot; ] &amp;&amp; git rev-parse --verify &quot;refs/tags/${TAG}&quot; &gt;/dev/null 2&gt;&amp;1; then\n"
-            "  echo &quot;Checkout tag ${TAG}&quot;\n"
-            "  git checkout -q &quot;${TAG}&quot;\n"
-            "else\n"
-            "  echo &quot;WARN: tag ${TAG} no existe en el repo; usando HEAD (default branch)&quot;\n"
-            "  git checkout -q HEAD\n"
-            "fi\n"
-            "ls -la\n"
-            "echo &quot;=========================================&quot;\n"
-            "echo &quot;STAGE 1/3: Unit tests&quot;\n"
-            "echo &quot;TEST_CMD: ${TEST_CMD}&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            "if [ -n &quot;${TEST_CMD}&quot; ]; then\n"
-            "  eval &quot;${TEST_CMD}&quot;\n"
-            "fi\n"
-            "echo &quot;TESTS OK&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            "echo &quot;STAGE 2/3 + 3/3: Build &amp; push image (kaniko)&quot;\n"
-            "echo &quot;Destination: docker.io/${IMAGE}:${TAG}&quot;\n"
-            "echo &quot;=========================================&quot;\n"
-            "export DOCKER_CONFIG=${WORKSPACE}/.docker\n"
-            "mkdir -p &quot;$DOCKER_CONFIG&quot;\n"
-            "if [ -n &quot;${DOCKERHUB_USER}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_USER}&quot; != &quot;placeholder&quot; ] &amp;&amp; [ -n &quot;${DOCKERHUB_PASSWORD}&quot; ] &amp;&amp; [ &quot;${DOCKERHUB_PASSWORD}&quot; != &quot;placeholder&quot; ]; then\n"
-            "  AUTH=$(printf &quot;%s:%s&quot; &quot;${DOCKERHUB_USER}&quot; &quot;${DOCKERHUB_PASSWORD}&quot; | base64 -w 0)\n"
-            "  printf '{&quot;auths&quot;:{&quot;docker.io&quot;:{&quot;auth&quot;:&quot;%s&quot;},&quot;https://index.docker.io/v1/&quot;:{&quot;auth&quot;:&quot;%s&quot;}}}\n' &quot;$AUTH&quot; &quot;$AUTH&quot; &gt; &quot;$DOCKER_CONFIG/config.json&quot;\n"
-            "fi\n"
-            # Init container deja el binario en /usr/local/kaniko/kaniko
-            # (tambien como `executor` por compat). /kaniko (montado
-            # desde emptyDir `kaniko-work`) es el staging dir escribible.
-            "if [ -x /usr/local/kaniko/kaniko ]; then\n"
-            "  KANIKO_BIN=/usr/local/kaniko/kaniko\n"
-            "elif [ -x /usr/local/kaniko/executor ]; then\n"
-            "  KANIKO_BIN=/usr/local/kaniko/executor\n"
-            "else\n"
-            "  echo &quot;ERROR: kaniko no instalado en /usr/local/kaniko/&quot; &gt;&amp;2\n"
-            "  exit 3\n"
-            "fi\n"
-            "mkdir -p ${WORKSPACE}/.kaniko\n"
-            "&quot;${KANIKO_BIN}&quot; \\\n"
-            "  --context=${WORKSPACE} \\\n"
-            "  --dockerfile=Dockerfile \\\n"
-            "  --destination=&quot;docker.io/${IMAGE}:${TAG}&quot; \\\n"
-            "  --cache=true \\\n"
-            "  --cache-repo=&quot;docker.io/${DOCKERHUB_USER}/kaniko-cache&quot; \\\n"
-            "  --snapshot-mode=time\n"
-            "echo &quot;BUILD+PUSH OK&quot;\n"
-            "echo &quot;PIPELINE COMPLETE&quot;\n"
-            "exit 0\n"
-            "</command>\n"
-            "    </hudson.tasks.Shell>\n"
-            "  </builders>\n"
-            "  <publishers/>\n"
-            "  <buildWrappers/>\n"
-            "</project>"
+            "</flow-definition>"
         )
 
         headers = {"Content-Type": "application/xml"}
@@ -495,7 +417,7 @@ class JenkinsService:
             headers["Jenkins-Crumb"] = crumb
 
         logger.info(
-            "jenkins.create_job START slug=%s job=%s url=%s xml_len=%d",
+            "jenkins.ensure_job_config START slug=%s job=%s url=%s xml_len=%d",
             slug, job, url, len(xml),
         )
         try:
@@ -503,7 +425,30 @@ class JenkinsService:
                                  timeout=JENKINS_TIMEOUT)
         except requests.RequestException as exc:
             logger.error(
-                "jenkins.create_job CONN_ERROR slug=%s err=%s",
+                "jenkins.ensure_job_config CONN_ERROR slug=%s err=%s",
+                slug, exc,
+            )
+            raise AppError(
+                f"Jenkins no respondio al crear el job: {exc}",
+                status_code=504,
+            ) from exc
+
+
+
+        headers = {"Content-Type": "application/xml"}
+        if crumb:
+            headers["Jenkins-Crumb"] = crumb
+
+        logger.info(
+            "jenkins.ensure_job_config START slug=%s job=%s url=%s xml_len=%d",
+            slug, job, url, len(xml),
+        )
+        try:
+            resp = requests.post(url, data=xml.encode("utf-8"), headers=headers,
+                                 timeout=JENKINS_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.error(
+                "jenkins.ensure_job_config CONN_ERROR slug=%s err=%s",
                 slug, exc,
             )
             raise AppError(
@@ -512,18 +457,18 @@ class JenkinsService:
             ) from exc
 
         if resp.status_code in (200, 201):
-            logger.info("jenkins.create_job OK slug=%s job=%s", slug, job)
+            logger.info("jenkins.ensure_job_config OK slug=%s job=%s", slug, job)
             return True
         # 409 = ya existe: REFRESCAMOS el config del job existente
         # (POST /job/<name>/config.xml). Esto es importante porque un
         # job creado con una version vieja del codigo no se actualiza
-        # solo: al re-llamar create_job (p.ej. al recrear la app) el
+        # solo: al re-llamar ensure_job_config (p.ej. al recrear la app) el
         # job queda con el pipeline nuevo y el build token actualizado.
         if resp.status_code == 409 or "already exists" in resp.text.lower():
             return JenkinsService._refresh_job_config(slug, job, xml, crumb)
         # 403 con crumb invalido: lo logueamos y reintentamos sin crumb una vez.
         if resp.status_code == 403 and crumb:
-            logger.warning("jenkins.create_job CRUMB_RETRY slug=%s (403 con crumb)", slug)
+            logger.warning("jenkins.ensure_job_config CRUMB_RETRY slug=%s (403 con crumb)", slug)
             try:
                 resp = requests.post(url, data=xml.encode("utf-8"),
                                      headers={"Content-Type": "application/xml"},
@@ -531,12 +476,12 @@ class JenkinsService:
             except requests.RequestException as exc:
                 raise AppError(f"Jenkins no respondio: {exc}", status_code=504) from exc
             if resp.status_code in (200, 201):
-                logger.info("jenkins.create_job OK_AFTER_RETRY slug=%s", slug)
+                logger.info("jenkins.ensure_job_config OK_AFTER_RETRY slug=%s", slug)
                 return True
             if resp.status_code == 409 or "already exists" in resp.text.lower():
                 return JenkinsService._refresh_job_config(slug, job, xml, crumb=None)
         logger.error(
-            "jenkins.create_job REJECTED slug=%s status=%s body=%s",
+            "jenkins.ensure_job_config REJECTED slug=%s status=%s body=%s",
             slug, resp.status_code, resp.text[:200],
         )
         raise AppError(
@@ -550,7 +495,7 @@ class JenkinsService:
     ) -> bool:
         """Actualiza el config de un job existente con el XML nuevo.
 
-        Llamado desde create_job cuando Jenkins responde 409 (job ya
+        Llamado desde ensure_job_config cuando Jenkins responde 409 (job ya
         existe). Hace POST /job/<job>/config.xml con el mismo XML que
         usariamos para crearlo. Asi un job viejo se refresca al pipeline
         nuevo + build token actualizado en una sola llamada, sin que el
@@ -624,6 +569,189 @@ class JenkinsService:
             slug, resp.status_code, resp.text[:200],
         )
         return False
+
+    @staticmethod
+    def _build_pipeline_groovy() -> str:
+        """Devuelve el script Groovy (CpsFlowDefinition) para el job.
+
+        Stages:
+          - Init: log de params.
+          - Clone: git clone (con GITHUB_PAT si llega).
+          - Test: autodeteccion de framework.
+          - Build+Push: kaniko contra docker.io.
+
+        Las PasswordParameters (GITHUB_PAT, DOCKERHUB_USER, DOCKERHUB_PASSWORD)
+        son auto-masked en logs por Jenkins. El IMAGE llega como param
+        `owner/repo` sin registry ni tag; el stage Build+Push agrega
+        `docker.io/` y `:${TAG}`.
+        """
+        # Triple-quoted Groovy. Los ${...} son interpolaciones de Jenkins
+        # en runtime (no de Python). Las acciones de autodeteccion son
+        # best-effort: si no encuentran nada, exit 0 (skip no falla el build).
+        # Usamos r""" (no r''') porque el Groovy contiene `sh '''...'''`
+        # y eso cerraria el string Python prematuramente.
+        return r"""pipeline {
+    agent any
+    options { timestamps() }
+    environment {
+        IMAGE_FULL = "docker.io/${IMAGE}"
+    }
+    stages {
+        stage('Init') {
+            steps {
+                echo "=========================================="
+                echo "STAGE Init"
+                echo "TAG=${params.TAG}  REPO=${params.REPO}  IMAGE=${params.IMAGE}"
+                echo "=========================================="
+            }
+        }
+        stage('Clone') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=========================================="
+                    echo "STAGE Clone: ${REPO} (tag ${TAG})"
+                    echo "=========================================="
+                    cd ${WORKSPACE}
+                    rm -rf ${WORKSPACE}/* ${WORKSPACE}/.git ${WORKSPACE}/.[!.]* 2>/dev/null || true
+                    if [ -n "${GITHUB_PAT}" ] && [ "${GITHUB_PAT}" != "placeholder" ]; then
+                        git clone "https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git" .
+                    else
+                        git clone "https://github.com/${REPO}.git" .
+                    fi
+                    if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+                        echo "ERROR: el repo ${REPO} esta vacio. Haz un push inicial a master antes de disparar el build." >&2
+                        exit 2
+                    fi
+                    if [ -n "${TAG}" ] && git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+                        echo "Checkout tag ${TAG}"
+                        git checkout -q "${TAG}"
+                    else
+                        echo "WARN: tag ${TAG} no existe en el repo; usando HEAD"
+                        git checkout -q HEAD
+                    fi
+                    ls -la
+                '''
+            }
+        }
+        stage('Test') {
+            steps {
+                sh '''
+                    set +e  # stage Test no debe romper el pipeline si autodetect falla
+                    echo "=========================================="
+                    echo "STAGE Test (autodetect)"
+                    echo "=========================================="
+                    cd ${WORKSPACE}
+
+                    if [ -f composer.json ]; then
+                        echo "[test] composer.json detectado"
+                        if grep -q '"test"' composer.json 2>/dev/null; then
+                            if command -v composer >/dev/null 2>&1; then
+                                composer install --no-interaction --prefer-dist 2>&1 | tail -20
+                                composer test
+                                TEST_RESULT=$?
+                            else
+                                echo "[test] SKIP: composer no instalado"
+                                TEST_RESULT=0
+                            fi
+                        elif [ -f phpunit.xml ] || [ -f phpunit.xml.dist ]; then
+                            if [ ! -d vendor ] && command -v composer >/dev/null 2>&1; then
+                                composer install --no-interaction --prefer-dist 2>&1 | tail -10
+                            fi
+                            if [ -x vendor/bin/phpunit ]; then
+                                vendor/bin/phpunit
+                                TEST_RESULT=$?
+                            else
+                                echo "[test] SKIP: phpunit no instalado"
+                                TEST_RESULT=0
+                            fi
+                        else
+                            echo "[test] SKIP: composer.json sin script 'test' ni phpunit.xml"
+                            TEST_RESULT=0
+                        fi
+                    elif [ -f package.json ]; then
+                        echo "[test] package.json detectado"
+                        if grep -q '"test"' package.json 2>/dev/null; then
+                            if command -v npm >/dev/null 2>&1; then
+                                npm test
+                                TEST_RESULT=$?
+                            else
+                                echo "[test] SKIP: npm no instalado"
+                                TEST_RESULT=0
+                            fi
+                        else
+                            echo "[test] SKIP: package.json sin script 'test'"
+                            TEST_RESULT=0
+                        fi
+                    elif [ -f pytest.ini ] || [ -f pyproject.toml ]; then
+                        echo "[test] proyecto Python detectado"
+                        if command -v pytest >/dev/null 2>&1; then
+                            pytest
+                            TEST_RESULT=$?
+                        else
+                            echo "[test] SKIP: pytest no instalado"
+                            TEST_RESULT=0
+                        fi
+                    else
+                        echo "[test] NO TESTS FOUND - saltando stage"
+                        TEST_RESULT=0
+                    fi
+
+                    echo "=========================================="
+                    if [ "$TEST_RESULT" -eq 0 ]; then
+                        echo "TESTS: PASSED o SKIPPED (rc=0)"
+                    else
+                        echo "TESTS: FAILED (rc=$TEST_RESULT)"
+                    fi
+                    echo "=========================================="
+                    exit $TEST_RESULT
+                '''
+            }
+        }
+        stage('Build+Push') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=========================================="
+                    echo "STAGE Build+Push (kaniko)"
+                    echo "Destination: ${IMAGE_FULL}:${TAG} + :latest"
+                    echo "=========================================="
+                    export DOCKER_CONFIG=${WORKSPACE}/.docker
+                    mkdir -p "$DOCKER_CONFIG"
+                    if [ -n "${DOCKERHUB_USER}" ] && [ "${DOCKERHUB_USER}" != "placeholder" ] \
+                       && [ -n "${DOCKERHUB_PASSWORD}" ] && [ "${DOCKERHUB_PASSWORD}" != "placeholder" ]; then
+                        AUTH=$(printf '%s:%s' "${DOCKERHUB_USER}" "${DOCKERHUB_PASSWORD}" | base64 -w 0)
+                        printf '{"auths":{"docker.io":{"auth":"%s"},"https://index.docker.io/v1/":{"auth":"%s"}}}\n' \
+                            "$AUTH" "$AUTH" > "$DOCKER_CONFIG/config.json"
+                    fi
+                    if [ -x /usr/local/kaniko/kaniko ]; then
+                        KANIKO_BIN=/usr/local/kaniko/kaniko
+                    elif [ -x /usr/local/kaniko/executor ]; then
+                        KANIKO_BIN=/usr/local/kaniko/executor
+                    else
+                        echo "ERROR: kaniko no instalado en /usr/local/kaniko/" >&2
+                        exit 3
+                    fi
+                    mkdir -p ${WORKSPACE}/.kaniko
+                    "${KANIKO_BIN}" \
+                      --context=${WORKSPACE} \
+                      --dockerfile=Dockerfile \
+                      --destination="${IMAGE_FULL}:${TAG}" \
+                      --destination="${IMAGE_FULL}:latest" \
+                      --cache=true \
+                      --cache-repo="docker.io/${DOCKERHUB_USER}/kaniko-cache" \
+                      --snapshot-mode=time
+                    echo "BUILD+PUSH OK"
+                '''
+            }
+        }
+    }
+    post {
+        success { echo "PIPELINE COMPLETE" }
+        failure { echo "PIPELINE FAILED" }
+    }
+}
+"""
 
     @staticmethod
     def job_exists(slug: str) -> bool:

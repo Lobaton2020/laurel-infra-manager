@@ -53,16 +53,17 @@ class Application(db.Model):
     status = db.Column(db.String(20), default="provisioning", nullable=False)
 
     # Version semver de la app (la que el webhook pasa a Jenkins como TAG al
-    # recibir un push a master). La UI la setea; si esta vacia, el webhook
-    # auto-bumpea desde 0.0.0 (legado).
+    # recibir un push a master). El webhook la auto-incrementa desde los
+    # tags de Docker Hub (ver webhooks/controller.py::_compute_next_version);
+    # la UI puede sobreescribirla via PATCH /current-version.
     current_version = db.Column(db.String(50), default="0.0.1", nullable=False)
 
-    # Comando de tests unitarios que Jenkins corre como STAGE 1 del pipeline
-    # (tests -> build -> push, con `set -e` para fail-fast). El operador lo
-    # setea al crear la app; si esta vacio, Jenkins corre un placeholder
-    # que siempre pasa. La idea es que cada app defina su propio comando
-    # (`pytest tests/`, `npm test`, `go test ./...`) sin tocar el codigo.
-    test_cmd = db.Column(db.Text, default="echo 'no tests configured'", nullable=False)
+    # Nota historica: existio una columna `test_cmd` (TEXT) donde el operador
+    # configuraba el comando a correr como STAGE 1 del pipeline Jenkins.
+    # Fue removida en favor de autodeteccion en el pipeline Groovy: el
+    # job inspecciona archivos del repo (composer.json, package.json,
+    # pytest.ini, etc.) y decide que framework correr. Ver
+    # `app/modules/integrations/jenkins/service.py::ensure_job_config`.
 
     created_at = db.Column(db.DateTime, default=utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow, nullable=False)

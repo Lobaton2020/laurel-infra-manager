@@ -298,21 +298,20 @@ class TestAppCreateJenkinsJob:
         from app.modules.integrations.jenkins.service import JenkinsService
         called = {"args": None}
 
-        def fake_create(slug, test_cmd, image_base, github_repo_url=None):
+        def fake_create(slug, image_base, github_repo_url=None):
             called["args"] = {
-                "slug": slug, "test_cmd": test_cmd,
+                "slug": slug,
                 "image_base": image_base, "github_repo_url": github_repo_url,
             }
             return True
 
-        monkeypatch.setattr(JenkinsService, "create_job", staticmethod(fake_create))
+        monkeypatch.setattr(JenkinsService, "ensure_job_config", staticmethod(fake_create))
 
         r = client.post("/api/apps", json=app_payload)
         assert r.status_code == 201, r.get_json()
 
-        assert called["args"] is not None, "create_job no fue llamado"
+        assert called["args"] is not None, "ensure_job_config no fue llamado"
         assert called["args"]["slug"] == "notas"
-        assert "no tests" in called["args"]["test_cmd"]
         assert called["args"]["image_base"]  # default generado por ContainerRegistryService
 
         # Y el evento 'jenkins_job' aparece en el timeline
@@ -328,10 +327,10 @@ class TestAppCreateJenkinsJob:
         from app.core.errors import AppError
         from app.modules.integrations.jenkins.service import JenkinsService
 
-        def fake_create_boom(slug, test_cmd, image_base, github_repo_url=None):
+        def fake_create_boom(slug, image_base, github_repo_url=None):
             raise AppError("Jenkins unavailable", status_code=503)
 
-        monkeypatch.setattr(JenkinsService, "create_job", staticmethod(fake_create_boom))
+        monkeypatch.setattr(JenkinsService, "ensure_job_config", staticmethod(fake_create_boom))
 
         r = client.post("/api/apps", json=app_payload)
         assert r.status_code == 503, r.get_json()

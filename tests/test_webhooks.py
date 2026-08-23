@@ -99,7 +99,7 @@ class TestWebhookEndpoint:
         _create_app_and_scoop(client, current_version="1.4.2")
         triggered = {}
 
-        def _fake_trigger(slug, tag, test_cmd=None):
+        def _fake_trigger(slug, tag):
             triggered["slug"] = slug
             triggered["tag"] = tag
             return {
@@ -134,7 +134,7 @@ class TestWebhookEndpoint:
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
         _create_app_and_scoop(client, current_version="2.0.0")
 
-        def _fake_trigger(slug, tag, test_cmd=None):
+        def _fake_trigger(slug, tag):
             return {"job": f"laurel_{slug}", "number": 7, "url": "http://x"}
 
         monkeypatch.setattr(JenkinsService, "trigger_build", _fake_trigger)
@@ -164,7 +164,7 @@ class TestWebhookEndpoint:
         app.config["GITHUB_WEBHOOK_SECRET"] = SECRET
         _create_app_and_scoop(client, current_version="1.4.2")
 
-        def _boom(slug, tag, test_cmd=None):
+        def _boom(slug, tag):
             raise AppError(f"Jenkins job 'laurel_{slug}' not found", status_code=404)
 
         monkeypatch.setattr(JenkinsService, "trigger_build", _boom)

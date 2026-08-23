@@ -123,9 +123,8 @@ def _process_github_push(payload: dict, source: str) -> tuple:
     )
     pusher = (payload.get("pusher") or {}).get("name", "")
     logger.info(
-        "%s.github ROUTED app=%s slug=%s version=%s sha=%s pusher=%s test_cmd_len=%d",
+        "%s.github ROUTED app=%s slug=%s version=%s sha=%s pusher=%s",
         source, app.id, slug, new_version, sha[:12] if sha else "", pusher,
-        len(app.test_cmd or ""),
     )
 
     # Propagamos la version a los scoops. Best-effort.
@@ -142,9 +141,7 @@ def _process_github_push(payload: dict, source: str) -> tuple:
 
     jenkins_info: dict
     try:
-        result = JenkinsService.trigger_build(
-            slug, new_version, test_cmd=app.test_cmd
-        )
+        result = JenkinsService.trigger_build(slug, new_version)
         jenkins_info = {
             "triggered": True,
             "job": result["job"],

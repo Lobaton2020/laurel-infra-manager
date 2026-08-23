@@ -38,7 +38,7 @@ class TestAppProvisionEvents:
     def test_create_app_with_workspace_records_events_and_ok(self, client, auth, ws):
         # Sin PATs (TestConfig los vacia): github no pedido -> error, Docker
         # Hub create falla (sin creds) -> error, namespace K8s ok (no-op en
-        # tests: cluster mocked), Jenkins job ok (create_job mockeado).
+        # tests: cluster mocked), Jenkins job ok (ensure_job_config mockeado).
         r = client.post("/api/apps", json={"name": "Notas", "workspace_id": ws["id"]}, headers=auth())
         assert r.status_code == 201, r.get_json()
         app = r.get_json()

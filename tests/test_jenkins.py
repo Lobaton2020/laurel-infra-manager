@@ -63,52 +63,15 @@ class TestTriggerBuild:
         # El IMAGE se envia SIN registry ni tag (el job agrega docker.io/ y :${TAG}).
         # Sin app en BD ni system secret -> password params "placeholder";
         # el user se defaulta a "aflobaton" (igual que docker/service._get_user()).
+        # Sin TEST_CMD/SLUG: el pipeline autodetecta el framework en Clone+Test.
         assert posted["data"] == {
-            "SLUG": "notas",
             "TAG": "1.2.4",
             "REPO": "laurel-applications/laurel_notas",
             "IMAGE": "laurel_notas",
-            "TEST_CMD": "echo '[no test_cmd configured]'",
             "GITHUB_PAT": "placeholder",
             "DOCKERHUB_USER": "aflobaton",
             "DOCKERHUB_PASSWORD": "placeholder",
         }
-
-    def test_trigger_passes_custom_test_cmd(self, app, monkeypatch):
-        """Si el caller pasa test_cmd, se manda tal cual en POST data."""
-        app.config["JENKINS_URL"] = "http://jenkins:8080"
-        posted = {}
-
-        def _post(url, params=None, data=None, timeout=None, **kwargs):
-            posted.update(data=data)
-            resp = Mock(status_code=201, text="")
-            resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/1/"}
-            return resp
-
-        monkeypatch.setattr(jenkins_service.requests, "post", _post)
-        monkeypatch.setattr(jenkins_service, "_get_build_token", lambda: "tok")
-        with app.app_context():
-            JenkinsService.trigger_build("notas", "1.0.0", test_cmd="pytest tests/")
-
-        assert posted["data"]["TEST_CMD"] == "pytest tests/"
-
-    def test_trigger_empty_test_cmd_uses_placeholder(self, app, monkeypatch):
-        """Si test_cmd viene vacio o whitespace, manda un placeholder."""
-        app.config["JENKINS_URL"] = "http://jenkins:8080"
-        posted = {}
-
-        def _post(url, params=None, data=None, timeout=None, **kwargs):
-            posted.update(data=data)
-            resp = Mock(status_code=201, text="")
-            resp.headers = {"Location": "http://jenkins:8080/job/laurel_notas/1/"}
-            return resp
-
-        monkeypatch.setattr(jenkins_service.requests, "post", _post)
-        monkeypatch.setattr(jenkins_service, "_get_build_token", lambda: "tok")
-        with app.app_context():
-            JenkinsService.trigger_build("notas", "1.0.0", test_cmd="   ")
-
-        assert posted["data"]["TEST_CMD"] == "echo '[no test_cmd configured]'"
 
     @pytest.mark.parametrize("status,expected_status,expected_msg", [
         (401, 502, "Jenkins authentication failed"),

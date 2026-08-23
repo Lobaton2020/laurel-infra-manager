@@ -11,3 +11,8 @@ HO2 2:
 
 H03:
  - En el proceso de deploy aplicar difernetes estrategias y tambien que tome la nueva version asi como algunc config que se haya creado adicional o secrets.
+
+H04:
+- En el proceso de crear una nueva app siempre debe crear el repositorio, quitar aviso: Crear repo vacio en GitHub al guardar (requiere PAT configurado)
+- Cuando se elimina una app, refrescarla del entorno actual segun el workspace
+- 
