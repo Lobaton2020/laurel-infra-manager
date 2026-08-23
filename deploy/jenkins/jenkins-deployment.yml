@@ -97,19 +97,25 @@ spec:
           image: jenkins/jenkins:2.516.3-lts-jdk21
           imagePullPolicy: IfNotPresent
           securityContext:
-            # Jenkins corre como uid 1000 por diseno de la imagen oficial.
-            # PERO kaniko (al hacer chown del Dockerfile a root durante el
-            # build) necesita CAP_CHOWN. Sin esa cap, falla con:
-            #   "chown /kaniko/Dockerfile: operation not permitted"
-            # Agregamos solo la cap minima necesaria; NO subimos a root.
-            runAsUser: 1000
-            runAsGroup: 1000
-            runAsNonRoot: true
+            # Kaniko NECESITA uid 0 (root) para hacer chown al rootfs
+            # durante el unpacking de capas de la imagen base. Solo agregar
+            # CAP_CHOWN NO alcanza: falla con
+            #   "failed to get filesystem from image: chown /: operation not permitted"
+            # porque ciertas operaciones de chown sobre el rootfs requieren
+            # uid 0 real, no solo la capability.
+            #
+            # Trade-off de seguridad: Jenkins corre como root en este pod.
+            # Mitigamos con:
+            #   - readOnlyRootFilesystem: false (necesario para escribir)
+            #   - allowPrivilegeEscalation: false (no setuid binaries)
+            #   - Sin CAP_SYS_ADMIN, CAP_NET_ADMIN, etc. Solo lo que necesita
+            #     jenkins + kaniko para funcionar.
+            #   - Pod aislado: PVC dedicado, ingress con auth, build tokens
+            #     para trigger.
+            runAsUser: 0
+            runAsGroup: 0
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
-            capabilities:
-              add:
-                - CHOWN
           ports:
             - containerPort: 8080
               name: http
