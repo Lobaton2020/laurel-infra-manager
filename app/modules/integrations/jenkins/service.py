@@ -592,7 +592,6 @@ class JenkinsService:
         # y eso cerraria el string Python prematuramente.
         return r"""pipeline {
     agent any
-    options { timestamps() }
     environment {
         IMAGE_FULL = "docker.io/${IMAGE}"
     }
