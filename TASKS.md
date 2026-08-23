@@ -15,4 +15,7 @@ H03:
 H04:
 - En el proceso de crear una nueva app siempre debe crear el repositorio, quitar aviso: Crear repo vacio en GitHub al guardar (requiere PAT configurado)
 - Cuando se elimina una app, refrescarla del entorno actual segun el workspace
-- 
+- Aplicar la seguridad entre github y mi app
+- Apliar seguridad entre jenkins y mi app
+- Aplicar seguridad en jenkins para no enviar credenciales en peticion http sino que esten en jenkins, credenciales de docker hub y github
+- Al cosultar estado del deployment, debe validar para que tome el id correco del deploy, por que no es igual sl id de la applicacion. atualmente esta mal.

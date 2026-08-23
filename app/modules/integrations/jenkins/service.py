@@ -144,12 +144,10 @@ class JenkinsService:
         Parametros enviados al job:
           - TAG (string): la version a buildear (auto-increment desde Docker
             Hub tags, calculada por el webhook).
-          - REPO (string): `owner/name` del repo GitHub.
+          - REPO (string): `owner/name` del repo GitHub (publico, no requiere
+            PAT — todos los repos de laurel-applications son publicos).
           - IMAGE (string): `owner/repo` sin registry ni tag (lo completa
             el pipeline con `docker.io/${IMAGE}:${TAG}`).
-          - GITHUB_PAT (PasswordParameter, masked): para git clone de
-            repos privados. Llega como `placeholder` si no esta
-            configurado.
           - DOCKERHUB_USER / DOCKERHUB_PASSWORD (PasswordParameter,
             masked): credenciales de Docker Hub para el push via kaniko.
             Llegan como `placeholder` si no estan configuradas; el job
@@ -172,18 +170,9 @@ class JenkinsService:
         base = JenkinsService._base_url()
         url = f"{base}/job/{job}/buildWithParameters"
 
-        # GITHUB_PAT: para `git clone` de repos privados (el job lo usa en
-        # STAGE Clone). Lo leemos igual que github/service.py (env primero,
-        # fallback al system secret `github_pat`).
-        github_pat = ""
-        try:
-            from app.modules.integrations.github.service import _get_pat
-            github_pat = _get_pat()
-        except AppError:
-            github_pat = ""
-
         # Credenciales de Docker Hub: mismas fuentes que docker/service.py
         # (env primero, fallback al system secret `docker_pat`).
+        # El job las necesita para hacer docker login y pushear a docker.io.
         dockerhub_user = ""
         dockerhub_pass = ""
         try:
@@ -252,7 +241,6 @@ class JenkinsService:
                     # PasswordParameters en el job: Jenkins los enmascara
                     # en el log del build. Viajan en el body del POST
                     # (form-encoded), NO en la URL.
-                    "GITHUB_PAT": github_pat or "placeholder",
                     "DOCKERHUB_USER": dockerhub_user or "placeholder",
                     "DOCKERHUB_PASSWORD": dockerhub_pass or "placeholder",
                 },
@@ -394,7 +382,6 @@ class JenkinsService:
             f"        <hudson.model.StringParameterDefinition><name>TAG</name><defaultValue>0.0.1</defaultValue><description>tag/version a buildear (auto-increment calculado por el webhook desde Docker Hub tags)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>REPO</name><defaultValue>{repo}</defaultValue><description>repo GitHub (owner/name)</description></hudson.model.StringParameterDefinition>\n"
             f"        <hudson.model.StringParameterDefinition><name>IMAGE</name><defaultValue>{image_no_registry}</defaultValue><description>imagen destino SIN registry ni tag (e.g. owner/repo). El pipeline agrega docker.io/ y :${{TAG}}</description></hudson.model.StringParameterDefinition>\n"
-            "        <hudson.model.PasswordParameterDefinition><name>GITHUB_PAT</name><defaultValue>placeholder</defaultValue><description>GitHub PAT para git clone de repos privados. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_USER</name><defaultValue>placeholder</defaultValue><description>User de Docker Hub (namespace del repo). Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "        <hudson.model.PasswordParameterDefinition><name>DOCKERHUB_PASSWORD</name><defaultValue>placeholder</defaultValue><description>Password/token de Docker Hub para push a docker.io. Auto-masked en logs; el backend lo envia en cada trigger.</description></hudson.model.PasswordParameterDefinition>\n"
             "      </parameterDefinitions>\n"
@@ -590,6 +577,12 @@ class JenkinsService:
         # best-effort: si no encuentran nada, exit 0 (skip no falla el build).
         # Usamos r""" (no r''') porque el Groovy contiene `sh '''...'''`
         # y eso cerraria el string Python prematuramente.
+        #
+        # NOTA: GITHUB_PAT no esta en el job. Todos los repos de
+        # laurel-applications son publicos, asi que el clone no
+        # requiere autenticacion. Si en el futuro se necesitan repos
+        # privados, agregar GITHUB_PAT como PasswordParameter y volver
+        # al condicional en el Clone stage.
         return r"""pipeline {
     agent any
     environment {
@@ -613,13 +606,12 @@ class JenkinsService:
                     echo "=========================================="
                     cd ${WORKSPACE}
                     rm -rf ${WORKSPACE}/* ${WORKSPACE}/.git ${WORKSPACE}/.[!.]* 2>/dev/null || true
-                    if [ -n "${GITHUB_PAT}" ] && [ "${GITHUB_PAT}" != "placeholder" ]; then
-                        git clone "https://x-access-token:${GITHUB_PAT}@github.com/${REPO}.git" .
-                    else
-                        git clone "https://github.com/${REPO}.git" .
-                    fi
+                    # Repos publicos: clone sin auth. Si en el futuro se
+                    # necesitan repos privados, agregar GITHUB_PAT como
+                    # PasswordParameter en el job y volver al condicional.
+                    git clone "https://github.com/${REPO}.git" .
                     if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
-                        echo "ERROR: el repo ${REPO} esta vacio. Haz un push inicial a master antes de disparar el build." >&2
+                        echo "ERROR: el repo ${REPO} no tiene commits en la default branch. Haz un push inicial antes de disparar el build." >&2
                         exit 2
                     fi
                     if [ -n "${TAG}" ] && git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then

@@ -63,12 +63,12 @@ class TestTriggerBuild:
         # El IMAGE se envia SIN registry ni tag (el job agrega docker.io/ y :${TAG}).
         # Sin app en BD ni system secret -> password params "placeholder";
         # el user se defaulta a "aflobaton" (igual que docker/service._get_user()).
-        # Sin TEST_CMD/SLUG: el pipeline autodetecta el framework en Clone+Test.
+        # Sin TEST_CMD/SLUG/GITHUB_PAT: el job clona publico (repos publicos)
+        # y autodetecta el framework en Clone+Test.
         assert posted["data"] == {
             "TAG": "1.2.4",
             "REPO": "laurel-applications/laurel_notas",
             "IMAGE": "laurel_notas",
-            "GITHUB_PAT": "placeholder",
             "DOCKERHUB_USER": "aflobaton",
             "DOCKERHUB_PASSWORD": "placeholder",
         }
