@@ -49,3 +49,5 @@ H14:
 - Aplicar uso de sidecards para monitoreo de los scoops
 
 H15: Comprar un dominio aparte para desplegar apps solo de productos para venta o lo que sea.
+H16: COnfigurar como parametro por defecto el puerto que se expone la app el 80 pero se puede configurar al que el usuario quier.
+H17: COnfigurar el desescalado a 0 en ciertos horarios segun la necesidad.
