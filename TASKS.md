@@ -39,3 +39,11 @@ H10: En el front esta url /scoops/new que es para crear un nuevo scope, en la pa
 
 H11:
  EN la lista de scoops, quita la columna de application y deja solo Name, ya se sabe que por seleccion global en que app se esta trabajando
+
+H12:
+- Al dar click al boton para ver los logs, en el detalle de un scope /scoops/32 no carga bien el formato de los logs.
+h13:
+- Actualiza la vista de edicion de un scoop, hay campos que deben sera añadidos u otros eliminados.
+
+H14:
+- Aplicar uso de sidecards para monitoreo de los scoops
