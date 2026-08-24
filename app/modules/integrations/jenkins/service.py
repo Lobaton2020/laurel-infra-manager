@@ -789,6 +789,13 @@ class JenkinsService:
         reconstruye la URL como `{base}/job/{PREFIX}{slug}/{n}` (modo
         legacy, mantenido para compatibilidad).
 
+        Maneja URLs de queue (`/queue/item/<id>/`) que Jenkins devuelve
+        cuando el build esta encolado. Si la queue API ya tiene el
+        `executable.url`, lo usa; si no (404 = item consumido), busca
+        el build por numero en el job. Asi la URL guardada en
+        `AppBuild.jenkins_url` puede ser de queue o de build y el
+        polling sigue funcionando.
+
         Returns: `{"status", "building", "result", "timestamp"}` mapeado
         a los valores del modelo AppBuild:
         - building=True  -> 'running'
@@ -798,6 +805,13 @@ class JenkinsService:
         """
         _validate_slug(slug)
         if build_url:
+            # Caso A: URL de queue (/queue/item/<id>/). Resolvemos via
+            # queue API; si ya hay executable, lo seguimos; si no, el
+            # build sigue encolado.
+            if "/queue/item/" in build_url:
+                return JenkinsService._resolve_queue_and_get_status(
+                    slug, build_url,
+                )
             # Normalizo: el caller puede haber guardado con o sin /api/json.
             url = build_url.rstrip("/")
             if not url.endswith("/api/json"):
@@ -859,6 +873,139 @@ class JenkinsService:
             "timestamp": data.get("timestamp"),
             "number": number,
         }
+
+    @staticmethod
+    def _resolve_queue_and_get_status(slug: str, queue_url: str) -> dict:
+        """Resuelve una URL de queue (`/queue/item/<id>/`) a un build real.
+
+        Jenkins devuelve `/queue/item/<id>/` en el `Location` del trigger
+        cuando el build esta encolado. La URL de queue es fragil:
+          - Mientras esta encolada, `queue_url/api/json` -> 200 con
+            `executable: null` o `executable.url` si ya arranco.
+          - Una vez que el build arranca, Jenkins CONSUME el item de la
+            queue y la URL devuelve 404 (es un puntero efimero).
+        - Si llega a `lastBuild` por numero, perfecto.
+        - Si llegamos aca y la queue API dio 404 (item consumido),
+          buscamos el build por numero en el job como fallback.
+        """
+        queue_url = queue_url.rstrip("/")
+        logger.info(
+            "jenkins.resolve_queue START slug=%s queue_url=%s",
+            slug, queue_url,
+        )
+        try:
+            qresp = requests.get(
+                f"{queue_url}/api/json",
+                timeout=JENKINS_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "jenkins.resolve_queue NET_ERROR queue_url=%s err=%s",
+                queue_url, exc,
+            )
+            raise AppError("Jenkins timeout", status_code=504) from exc
+        if qresp.status_code == 200:
+            try:
+                qdata = qresp.json()
+            except ValueError:
+                qdata = {}
+            executable = qdata.get("executable") or {}
+            executable_url = executable.get("url")
+            executable_number = executable.get("number")
+            if executable_url:
+                logger.info(
+                    "jenkins.resolve_queue FOUND_EXECUTABLE queue_url=%s "
+                    "executable_url=%s number=%s",
+                    queue_url, executable_url, executable_number,
+                )
+                return JenkinsService.get_build_status(
+                    slug=slug, build_url=executable_url,
+                )
+            logger.info(
+                "jenkins.resolve_queue STILL_QUEUED queue_url=%s",
+                queue_url,
+            )
+            return {
+                "status": "pending",
+                "building": True,
+                "result": None,
+                "timestamp": None,
+                "number": None,
+            }
+        if qresp.status_code == 404:
+            # Queue item consumido: el build ya arranco o nunca existio.
+            # Fallback: buscar el build por numero en el job. Si el caller
+            # tenia jenkins_number, lo intenta; si no, usa lastBuild.
+            logger.warning(
+                "jenkins.resolve_queue ITEM_GONE queue_url=%s (404), "
+                "fallback a busqueda por job",
+                queue_url,
+            )
+            return JenkinsService._find_build_via_job(slug, queue_url)
+        logger.error(
+            "jenkins.resolve_queue UNEXPECTED queue_url=%s status=%s body=%s",
+            queue_url, qresp.status_code, qresp.text[:200],
+        )
+        raise AppError(
+            f"Jenkins queue API error {qresp.status_code}: {qresp.text[:200]}",
+            status_code=502,
+        )
+
+    @staticmethod
+    def _find_build_via_job(slug: str, queue_url: str) -> dict:
+        """Fallback: cuando la URL de queue dio 404, busca el build via
+        el endpoint del job. Usa `lastBuild` para encontrar el numero
+        y devuelve el status de ese build.
+        """
+        base = JenkinsService._base_url()
+        job = f"{PREFIX}{slug}"
+        job_api_url = f"{base}/job/{job}/api/json"
+        logger.info(
+            "jenkins.find_build_via_job slug=%s job_url=%s",
+            slug, job_api_url,
+        )
+        try:
+            resp = requests.get(job_api_url, timeout=JENKINS_TIMEOUT)
+        except requests.RequestException as exc:
+            logger.warning(
+                "jenkins.find_build_via_job NET_ERROR slug=%s err=%s",
+                slug, exc,
+            )
+            raise AppError("Jenkins timeout", status_code=504) from exc
+        if resp.status_code != 200:
+            logger.warning(
+                "jenkins.find_build_via_job NON_200 slug=%s status=%s",
+                slug, resp.status_code,
+            )
+            raise AppError(
+                f"Jenkins job API error {resp.status_code}",
+                status_code=502,
+            )
+        try:
+            jdata = resp.json()
+        except ValueError as exc:
+            raise AppError("Jenkins job API bad JSON", status_code=502) from exc
+        last_build = jdata.get("lastBuild") or {}
+        last_build_url = last_build.get("url")
+        if not last_build_url:
+            logger.warning(
+                "jenkins.find_build_via_job NO_LAST_BUILD slug=%s",
+                slug,
+            )
+            return {
+                "status": "pending",
+                "building": True,
+                "result": None,
+                "timestamp": None,
+                "number": None,
+            }
+        logger.info(
+            "jenkins.find_build_via_job FOUND slug=%s last_build_url=%s",
+            slug, last_build_url,
+        )
+        return JenkinsService.get_build_status(
+            slug=slug, build_url=last_build_url,
+        )
 
 
 def _parse_build_number(location_header: str | None) -> int | None:
@@ -961,8 +1108,10 @@ def _resolve_build_location(
             return executable_url.rstrip("/"), executable_number
         # Build todavia encolada (jenkins no la promovio a ejecutable
         # todavia). Devolvemos la URL de queue; el polling posterior
-        # funcionara: GET /queue/item/<id>/api/json -> 200 con executable
-        # una vez que arranque.
+        # (JenkinsService._resolve_queue_and_get_status) sabe como
+        # resolverla: si ya tiene executable.url la sigue, si no,
+        # retorna pending, y si la queue dio 404 (item consumido),
+        # busca el build via job.lastBuild.
         return loc, None
 
     # Caso 3: location con un formato raro que no pudimos parsear.

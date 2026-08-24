@@ -18,8 +18,7 @@ H04:
 - Aplicar la seguridad entre github y mi app
 - Apliar seguridad entre jenkins y mi app
 - Aplicar seguridad en jenkins para no enviar credenciales en peticion http sino que esten en jenkins, credenciales de docker hub y github
-- Al consultar estado del deployment, validar que se tome el id correcto del deploy (no es el mismo que el id de la aplicación). Actualmente en _poll_one: si jenkins_url está obsoleto o es incorrecto, el polling devuelve status erroneo. El back-end debe validar con Jenkins y Docker Hub antes de reportar al front-end.
-  Investigación en curso: _poll_one en app/modules/builds/service.py usa build.jenkins_job para derivar slug y build.jenkins_url para query. Necesita validación de que la URL sea la correcta y no se confunda con application_id.
+- Al consultar estado del deployment, validar que se tome el id correcto del deploy (no es el mismo que el id de la aplicación). **RESUELTO en este turno**: get_build_status ahora detecta URLs de queue (/queue/item/<id>/) y las resuelve de 3 formas: (a) queue API 200 + executable.url -> sigue el executable, (b) queue API 200 sin executable -> pending, (c) queue API 404 (item consumido) -> fallback a job.lastBuild. Tests en TestGetBuildStatusQueue (4 nuevos tests, todos pasan).
 
 H05:
  - EN el front al momento de crear un nuevo secrets asociado a una app, recuerda que en el estado global ya tienes la app seleccionada por lo que el form es inncesario del application, y el de namespace cada app crea un namespaces internamente por lo que tambien es innecesario ese campo,
