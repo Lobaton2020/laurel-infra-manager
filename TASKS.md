@@ -47,3 +47,5 @@ h13:
 
 H14:
 - Aplicar uso de sidecards para monitoreo de los scoops
+
+H15: Comprar un dominio aparte para desplegar apps solo de productos para venta o lo que sea.
