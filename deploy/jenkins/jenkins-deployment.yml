@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jenkins
+  namespace: prod
   labels:
     app: jenkins
   # Politica: este manifiesto NO contiene credenciales (API tokens, passwords,
@@ -226,6 +227,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: jenkins-init-scripts
+  namespace: prod
 data:
   # 1) Deshabilita CSRF y deja la auth como UNSECURED.
   #    El backend hace GETs anonimos a /job/<job>/api/json (job_exists,
@@ -333,6 +335,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: jenkins-home
+  namespace: prod
 spec:
   storageClassName: local-path
   accessModes:
