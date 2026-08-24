@@ -193,7 +193,7 @@ spec:
               memory: "1Gi"
             limits:
               cpu: "2000m"
-              memory: "3Gi"
+              memory: "2Gi"
       volumes:
         - name: jenkins-home
           persistentVolumeClaim:
