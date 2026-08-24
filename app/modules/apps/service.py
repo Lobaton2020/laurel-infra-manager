@@ -451,7 +451,7 @@ class AppsService:
         except Exception as exc:
             logger.warning("app_hard_delete: fallo borrando Jenkins job %s: %s", slug, exc)
 
-        # 4) DB: HARD DELETE. Las FKs declaradas en los modelos (scoops SET NULL,
+        # 4) DB: HARD DELETE. Las FKs declaradas en los modelos (scoops CASCADE,
         #    domains CASCADE, app_events CASCADE) hacen el resto. En SQLite
         #    se necesita PRAGMA foreign_keys=ON (activado en tests/conftest).
         deleted_id = app.id

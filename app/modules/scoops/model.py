@@ -72,7 +72,7 @@ class Scoop(db.Model):
     # el namespace default. El namespace se deriva del slug de la app
     # salvo override explicito en `namespace`.
     application_id = db.Column(
-        db.Integer, db.ForeignKey("applications.id", ondelete="SET NULL"),
+        db.Integer, db.ForeignKey("applications.id", ondelete="CASCADE"),
         nullable=True, index=True,
     )
 
