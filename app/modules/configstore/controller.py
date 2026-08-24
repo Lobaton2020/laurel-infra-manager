@@ -5,9 +5,7 @@ from app.core.http import parse_body
 from app.modules.audits.service import AuditService
 from app.modules.configstore.schema import (
     ConfigMapCreate,
-    ConfigMapUpdate,
     SecretCreate,
-    SecretUpdate,
 )
 from app.modules.configstore.service import ConfigStoreService
 
@@ -121,38 +119,6 @@ def create_configmap():
     return jsonify(_serialize_cm(result))
 
 
-@bp.put("/configmaps/<namespace>/<name>")
-def update_configmap(namespace: str, name: str):
-    """Reemplaza el `data` de un ConfigMap existente
-    ---
-    tags: [ConfigStore]
-    parameters:
-      - {name: namespace, in: path, required: true, type: string}
-      - {name: name, in: path, required: true, type: string}
-      - name: body
-        in: body
-        required: true
-        schema:
-          type: object
-          required: [data]
-          properties:
-            data: {type: object, additionalProperties: {type: string}}
-    responses:
-      200: {description: ConfigMap actualizado}
-      404: {description: No existe}
-      422: {description: Datos invalidos}
-    """
-    payload = parse_body(ConfigMapUpdate).model_dump()
-    result = ConfigStoreService.replace_configmap_data(
-        namespace, name, payload["data"]
-    )
-    AuditService.log(
-        "update", "configmap", f"{namespace}/{name}",
-        {"data": payload["data"]},
-    )
-    return jsonify(_serialize_cm(result))
-
-
 @bp.delete("/configmaps/<namespace>/<name>")
 def delete_configmap(namespace: str, name: str):
     """Elimina un ConfigMap del cluster
@@ -255,37 +221,6 @@ def create_secret():
         "create" if result.get("action") == "created" else "update",
         "secret", f"{namespace}/{name}",
         {"app": payload["app"]},  # NO guardamos data del secret en la auditoria
-    )
-    return jsonify(_serialize_secret(result))
-
-
-@bp.put("/secrets/<namespace>/<name>")
-def update_secret(namespace: str, name: str):
-    """Reemplaza el `data` de un Secret (en base64)
-    ---
-    tags: [ConfigStore]
-    parameters:
-      - {name: namespace, in: path, required: true, type: string}
-      - {name: name, in: path, required: true, type: string}
-      - name: body
-        in: body
-        required: true
-        schema:
-          type: object
-          required: [data]
-          properties:
-            data: {type: object, additionalProperties: {type: string, format: byte}}
-    responses:
-      200: {description: Secret actualizado}
-      404: {description: No existe}
-    """
-    payload = parse_body(SecretUpdate).model_dump()
-    result = ConfigStoreService.replace_secret_data(
-        namespace, name, payload["data"]
-    )
-    AuditService.log(
-        "update", "secret", f"{namespace}/{name}",
-        {"keys": sorted(payload["data"].keys())},  # auditamos que claves hay, no sus valores
     )
     return jsonify(_serialize_secret(result))
 

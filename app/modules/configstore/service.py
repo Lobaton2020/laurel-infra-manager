@@ -124,7 +124,7 @@ class ConfigStoreService:
             "kind": "ConfigMap",
             "metadata": {
                 "name": name,
-                "namespace": namespace,
+                "namespace": ns,
                 "labels": ConfigStoreService._labels(app),
             },
             "data": data,
@@ -132,31 +132,15 @@ class ConfigStoreService:
 
         action = "created"
         try:
-            clients.core.create_namespaced_config_map(namespace, body)
+            clients.core.create_namespaced_config_map(ns, body)
         except ApiException as exc:
             if exc.status != 409:
                 raise
-            clients.core.replace_namespaced_config_map(name, namespace, body)
+            clients.core.replace_namespaced_config_map(name, ns, body)
             action = "updated"
 
-        logger.info("ConfigMap '%s/%s' %s", namespace, name, action)
-        return ConfigStoreService.get_configmap(namespace, name) | {"action": action}
-
-    @staticmethod
-    def replace_configmap_data(namespace: str, name: str, data: dict) -> dict:
-        """Reemplaza el `data` de un ConfigMap. 404 si no existe."""
-        clients = get_clients()
-        try:
-            cm = clients.core.read_namespaced_config_map(name, namespace)
-        except ApiException as exc:
-            if exc.status == 404:
-                raise NotFoundError(f"ConfigMap '{namespace}/{name}' no existe") from exc
-            raise
-
-        cm.data = data
-        clients.core.replace_namespaced_config_map(name, namespace, cm)
-        logger.info("ConfigMap '%s/%s' data reemplazado", namespace, name)
-        return ConfigStoreService.get_configmap(namespace, name) | {"action": "updated"}
+        logger.info("ConfigMap '%s/%s' %s", ns, name, action)
+        return ConfigStoreService.get_configmap(ns, name) | {"action": action}
 
     @staticmethod
     def delete_configmap(namespace: str, name: str) -> dict:
@@ -244,7 +228,7 @@ class ConfigStoreService:
             "kind": "Secret",
             "metadata": {
                 "name": name,
-                "namespace": namespace,
+                "namespace": ns,
                 "labels": ConfigStoreService._labels(app),
             },
             "type": "Opaque",
@@ -253,31 +237,15 @@ class ConfigStoreService:
 
         action = "created"
         try:
-            clients.core.create_namespaced_secret(namespace, body)
+            clients.core.create_namespaced_secret(ns, body)
         except ApiException as exc:
             if exc.status != 409:
                 raise
-            clients.core.replace_namespaced_secret(name, namespace, body)
+            clients.core.replace_namespaced_secret(name, ns, body)
             action = "updated"
 
-        logger.info("Secret '%s/%s' %s", namespace, name, action)
-        return ConfigStoreService.get_secret(namespace, name) | {"action": action}
-
-    @staticmethod
-    def replace_secret_data(namespace: str, name: str, data: dict) -> dict:
-        clients = get_clients()
-        try:
-            s = clients.core.read_namespaced_secret(name, namespace)
-        except ApiException as exc:
-            if exc.status == 404:
-                raise NotFoundError(f"Secret '{namespace}/{name}' no existe") from exc
-            raise
-
-        s.data = data
-        s.type = s.type or "Opaque"
-        clients.core.replace_namespaced_secret(name, namespace, s)
-        logger.info("Secret '%s/%s' data reemplazado", namespace, name)
-        return ConfigStoreService.get_secret(namespace, name) | {"action": "updated"}
+        logger.info("Secret '%s/%s' %s", ns, name, action)
+        return ConfigStoreService.get_secret(ns, name) | {"action": action}
 
     @staticmethod
     def delete_secret(namespace: str, name: str) -> dict:

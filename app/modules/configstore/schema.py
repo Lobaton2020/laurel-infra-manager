@@ -42,19 +42,6 @@ class ConfigMapCreate(BaseModel):
         return v
 
 
-class ConfigMapUpdate(BaseModel):
-    """Reemplazo total del `data` del ConfigMap (PUT semantico)."""
-    data: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("data")
-    @classmethod
-    def _v_data(cls, v: dict[str, str]) -> dict[str, str]:
-        for key in v:
-            if not key:
-                raise ValueError("las claves de data no pueden estar vacias")
-        return v
-
-
 class SecretCreate(BaseModel):
     """Crea o reemplaza un Secret de aplicacion.
 
@@ -72,18 +59,6 @@ class SecretCreate(BaseModel):
     @classmethod
     def _v_name(cls, v: str | None) -> str | None:
         return _validate_name(v) if v is not None else v
-
-    @field_validator("data")
-    @classmethod
-    def _v_data(cls, v: dict[str, str]) -> dict[str, str]:
-        for key in v:
-            if not key:
-                raise ValueError("las claves de data no pueden estar vacias")
-        return v
-
-
-class SecretUpdate(BaseModel):
-    data: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("data")
     @classmethod

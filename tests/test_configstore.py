@@ -48,6 +48,8 @@ class _FakeCore:
         self.configmaps: dict[tuple[str, str], _FakeCM] = {}
         self.secrets: dict[tuple[str, str], _FakeSecret] = {}
         self.list_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.replace_calls: list[dict] = []
 
     def add_cm(self, name, namespace, app, data=None):
         self.configmaps[(namespace, name)] = _FakeCM(name, namespace, app, data)
@@ -79,6 +81,44 @@ class _FakeCore:
                 ]
         return SimpleNamespace(items=items)
 
+    def create_namespaced_config_map(self, namespace, body):
+        self.create_calls.append({"kind": "cm", "namespace": namespace, "name": body["metadata"]["name"]})
+        self.configmaps[(namespace, body["metadata"]["name"])] = _FakeCM(
+            body["metadata"]["name"], namespace,
+            body["metadata"].get("labels", {}).get(APP_LABEL_KEY, ""),
+            data=body.get("data") or {},
+        )
+
+    def create_namespaced_secret(self, namespace, body):
+        self.create_calls.append({"kind": "secret", "namespace": namespace, "name": body["metadata"]["name"]})
+        self.secrets[(namespace, body["metadata"]["name"])] = _FakeSecret(
+            body["metadata"]["name"], namespace,
+            body["metadata"].get("labels", {}).get(APP_LABEL_KEY, ""),
+            data=body.get("data") or {},
+        )
+
+    def replace_namespaced_config_map(self, name, namespace, body):
+        self.replace_calls.append({"kind": "cm", "namespace": namespace, "name": name})
+        self.configmaps[(namespace, name)] = _FakeCM(
+            name, namespace,
+            body["metadata"].get("labels", {}).get(APP_LABEL_KEY, ""),
+            data=body.get("data") or {},
+        )
+
+    def replace_namespaced_secret(self, name, namespace, body):
+        self.replace_calls.append({"kind": "secret", "namespace": namespace, "name": name})
+        self.secrets[(namespace, name)] = _FakeSecret(
+            name, namespace,
+            body["metadata"].get("labels", {}).get(APP_LABEL_KEY, ""),
+            data=body.get("data") or {},
+        )
+
+    def read_namespaced_config_map(self, name, namespace):
+        return self.configmaps[(namespace, name)]
+
+    def read_namespaced_secret(self, name, namespace):
+        return self.secrets[(namespace, name)]
+
 
 class _FakeClients:
     def __init__(self, core):
@@ -96,8 +136,35 @@ def fake_k8s(monkeypatch):
     monkeypatch.setattr(
         "app.modules.configstore.service.get_clients", lambda: clients, raising=False,
     )
+    # Evitamos tocar el cluster real: el namespace "ya existe".
+    monkeypatch.setattr(
+        "app.modules.cluster.service.K8sService.namespace_exists",
+        staticmethod(lambda _ns: True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.modules.cluster.service.K8sService.create_namespace",
+        staticmethod(lambda _ns: None),
+        raising=False,
+    )
     yield core
     reset_clients()
+
+
+@pytest.fixture
+def fake_apps(monkeypatch):
+    """Mockea el check `Application.query.filter_by(slug=..., deleted_at=None).first()`
+    para que crea que la app existe sin tocar la BD."""
+    class _Q:
+        def filter_by(self, **_kwargs):
+            return self
+        def first(self):
+            return SimpleNamespace(slug="alpha")
+    monkeypatch.setattr(
+        "app.modules.apps.model.Application.query",
+        _Q(),
+    )
+    yield
 
 
 # --------------------------- ConfigMaps ---------------------------
@@ -175,4 +242,68 @@ class TestListSecretsFiltering:
         names = [s["name"] for s in r.get_json()]
         assert "alpha-secret" in names
         assert "intruder" not in names
+
+
+# --------------------------- Create (regresion: namespace=None) ---------------------------
+
+class TestCreateResolvesNamespaceFromApp:
+    """Regresion: cuando el caller NO envia `namespace`, el service debe
+    autoderivarlo a `user-apps-<app>` antes de hablar con K8s.
+
+    Bug historico: la funcion usaba la variable `namespace` (que podia ser
+    None) en vez de `ns` (la ya resuelta) en metadata y en las llamadas al
+    cliente K8s. Resultado: 500 con `create_namespaced_secret(None, ...)`.
+    """
+
+    def test_post_secret_without_namespace_creates_in_app_ns(
+        self, client, fake_k8s, fake_apps,
+    ):
+        r = client.post(
+            "/api/configstore/secrets",
+            json={"app": "alpha", "data": {"k": "dmFsdWU="}},
+        )
+        assert r.status_code == 200, r.get_json()
+        # La llamada a K8s fue al namespace derivado, NO None.
+        assert len(fake_k8s.create_calls) == 1
+        call = fake_k8s.create_calls[0]
+        assert call["kind"] == "secret"
+        assert call["namespace"] == "user-apps-alpha"
+        assert call["name"] == "alpha-secret"
+        # El recurso quedo guardado en el namespace correcto.
+        assert ("user-apps-alpha", "alpha-secret") in fake_k8s.secrets
+
+    def test_post_configmap_without_namespace_creates_in_app_ns(
+        self, client, fake_k8s, fake_apps,
+    ):
+        r = client.post(
+            "/api/configstore/configmaps",
+            json={"app": "alpha", "data": {"k": "v"}},
+        )
+        assert r.status_code == 200, r.get_json()
+        assert len(fake_k8s.create_calls) == 1
+        call = fake_k8s.create_calls[0]
+        assert call["kind"] == "cm"
+        assert call["namespace"] == "user-apps-alpha"
+        assert ("user-apps-alpha", "alpha-config") in fake_k8s.configmaps
+
+    def test_post_secret_with_explicit_namespace_uses_it(
+        self, client, fake_k8s, fake_apps,
+    ):
+        """El override explicito del caller gana sobre la autoderivacion."""
+        r = client.post(
+            "/api/configstore/secrets",
+            json={"app": "alpha", "namespace": "staging", "data": {"k": "dg=="}},
+        )
+        assert r.status_code == 200, r.get_json()
+        assert fake_k8s.create_calls[0]["namespace"] == "staging"
+
+    def test_post_secret_unknown_app_returns_404(self, client, fake_k8s):
+        """No se debe crear un secret huerfano en cluster para una app
+        inexistente en la plataforma."""
+        r = client.post(
+            "/api/configstore/secrets",
+            json={"app": "ghost", "data": {"k": "dg=="}},
+        )
+        assert r.status_code == 404
+        assert fake_k8s.create_calls == []
 
