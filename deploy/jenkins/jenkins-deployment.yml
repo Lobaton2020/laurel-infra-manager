@@ -158,6 +158,9 @@ spec:
               mountPath: /workspace
             - name: kaniko-cache
               mountPath: /kaniko-cache
+            - name: plugins-file
+              mountPath: /usr/share/jenkins/ref/plugins.txt
+              subPath: plugins.txt
           # startupProbe evita que readiness/liveness maten el pod durante
           # el primer boot de Jenkins (descarga plugins, descomprime war,
           # puede tardar 2-3 min en clusters lentos).
@@ -214,6 +217,9 @@ spec:
           # Cache de layers de kaniko. emptyDir esta bien para empezar;
           # migrar a PVC si la cache pasa a ser valiosa.
           emptyDir: {}
+        - name: plugins-file
+          configMap:
+            name: jenkins-plugins
 ---
 # Scripts Groovy que corren en el primer arranque (y en cada reinicio
 # si el script es idempotente, que es lo que asumimos aca).
@@ -247,89 +253,39 @@ data:
     }
     instance.save()
     println "[init] Security: UNSECURED + crumb OFF"
-
-  # 2) Asegura que los plugins Multibranch estan instalados en cada arranque.
-  #    La imagen oficial jenkins/jenkins:2.516.3 NO trae los plugins de
-  #    multibranch instalados -> los instalamos via Update Center
-  #    (dynamicLoad=true evita reinicio).
-  #    ESTO ES AGNOSTICO A PROYECTOS: solo instala los plugins compartidos.
-  #    La creacion de jobs Multibranch es responsabilidad de cada proyecto/operador.
-  20-install-multibranch-plugins.groovy: |
-    import jenkins.install.Installable
-    import jenkins.model.Jenkins
-    import jenkins.model.UpdateCenter
-
-    def log = { println("[init-mb] " + it) }
-
-    // Plugins esenciales para Multibranch / Workflow / Blue Ocean
-    // (solo nombres, sin referencia a repo/Job).
-    //
-    // Blue Ocean provee la UI moderna con visualizacion de pipeline
-    // como cajas con logs abajo. Para que funcione, instalamos:
-    //   - blueocean: el plugin principal
-    //   - blueocean-pipeline-api / blueocean-rest / blueocean-rest-impl / blueocean-web
-    //   - blueocean-commons / blueocean-config / blueocean-dashboard
-    //   - blueocean-jwt / blueocean-personalization / blueocean-display-url
-    //   - blueocean-github-pipeline (si queres integracion con GH)
-    //
-    // Si solo vas a usar la UI clasica o la nueva UI built-in de Jenkins,
-    // podes comentar el bloque BLUE_OCEAN abajo para ahorrar tiempo de boot.
-    def PLUGINS = [
-        // --- Multibranch / Pipeline core ---
-        "workflow-multibranch",
-        "workflow-job",
-        "workflow-cps",
-        "workflow-step-api",
-        "branch-api",
-        "pipeline-stage-view",
-        "pipeline-graph-analysis",
-        "git",
-        "scm-api",
-        "script-security",
-        "workflow-support",
-
-        // --- Blue Ocean UI ---
-        "blueocean",
-        "blueocean-commons",
-        "blueocean-rest",
-        "blueocean-rest-impl",
-        "blueocean-web",
-        "blueocean-pipeline-api",
-        "blueocean-pipeline-editor",
-        "blueocean-dashboard",
-        "blueocean-jwt",
-        "blueocean-personalization",
-        "blueocean-config",
-        "blueocean-display-url",
-        "blueocean-i18n",
-        "blueocean-github-pipeline",
-    ]
-    def site = Jenkins.instance.updateCenter.getById("default")
-    def pending = []
-    PLUGINS.each { name ->
-        def p = site?.getPlugin(name)
-        if (p == null) {
-            log("WARN plugin '" + name + "' no esta en el Update Center")
-            return
-        }
-        if (p.getInstalled() != null) { return } // ya instalado
-        log("instalando plugin " + name + " ...")
-        pending << p.install(true)
-    }
-    pending.each { inst ->
-        def n = inst.plugin.name
-        log("esperando instalacion de " + n + " ...")
-        def timeoutMs = 180000
-        def elapsed = 0
-        while (inst.status != Installable.InstallationStatus.COMPLETED &&
-               inst.status != Installable.InstallationStatus.FAILED &&
-               elapsed < timeoutMs) {
-            Thread.sleep(3000); elapsed += 3000
-        }
-        log("  " + n + " -> " + inst.status)
-    }
-    log("[init-mb] Todos los plugins (Multibranch + Blue Ocean) asegurados. Prosiga a crear jobs por proyecto.")
-    log("[init-mb] Blue Ocean UI disponible en: ${Jenkins.instance.rootUrl}blue")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-plugins
+  namespace: prod
+data:
+  plugins.txt: |
+    workflow-multibranch
+    workflow-job
+    workflow-cps
+    workflow-step-api
+    branch-api
+    pipeline-stage-view
+    pipeline-graph-analysis
+    git
+    scm-api
+    script-security
+    workflow-support
+    blueocean
+    blueocean-commons
+    blueocean-rest
+    blueocean-rest-impl
+    blueocean-web
+    blueocean-pipeline-api
+    blueocean-pipeline-editor
+    blueocean-dashboard
+    blueocean-jwt
+    blueocean-personalization
+    blueocean-config
+    blueocean-display-url
+    blueocean-i18n
+    blueocean-github-pipeline
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
