@@ -21,7 +21,7 @@ import re
 
 from flask import current_app
 
-from app.core.constants import MANAGED_BY
+from app.core.constants import APP_NAMESPACE_PREFIX, MANAGED_BY
 
 # Los valores de label solo admiten alfanumericos, '-', '_' y '.', maximo 63 chars.
 _INVALID_LABEL_CHARS = re.compile(r"[^A-Za-z0-9._-]")
@@ -60,14 +60,16 @@ class ManifestService:
 
     @staticmethod
     def namespace_for(scoop, namespace: str | None = None) -> str:
-        # Prioridad: override del caller > scoop.namespace > application.slug > default.
+        # Prioridad: override del caller > scoop.namespace > user-apps-<app.slug> > default.
+        # Cada app va en su propio namespace (`user-apps-<slug>`) para aislar
+        # ConfigMaps/Secrets/pods por aplicacion.
         if namespace:
             return namespace
         if scoop.namespace:
             return scoop.namespace
         app = getattr(scoop, "app_record", None)
         if scoop.application_id and app and app.slug:
-            return app.slug
+            return f"{APP_NAMESPACE_PREFIX}{app.slug}"
         return current_app.config["DEFAULT_NAMESPACE"]
 
     @staticmethod

@@ -3,6 +3,7 @@ from flask import Blueprint, current_app, jsonify, request
 from kubernetes.client.exceptions import ApiException
 
 from app.core.errors import ConflictError
+from app.core.constants import APP_NAMESPACE_PREFIX
 from app.core.http import bool_arg, pagination, parse_body
 from app.modules.cluster.service import K8sService
 from app.modules.configstore.service import ConfigStoreService
@@ -74,17 +75,14 @@ def available_env_from():
         description: 'Filtra por la label app y autoderiva el namespace a user-apps-<app>'}
       - {name: namespace, in: query, type: string,
         description: 'Override del namespace (default: user-apps-<app> si hay app, sino DEFAULT_NAMESPACE)'}
-      - {name: exclude_application, in: query, type: string,
-        description: 'Si llega y coincide con un recurso auto-detectado (<app>-config / <app>-secret), se omite para no duplicar la inyeccion automatica'}
     responses:
-      200: {description: Lista unificada de CM y Secret con un campo kind}
+      200: {description: Lista unificada de CM y Secret (incluye los auto-inyectables por convencion <app>-config / <app>-secret; el manifest deduplica si el usuario los vuelve a seleccionar)}
     """
     app_filter = request.args.get("app")
     namespace = (
         request.args.get("namespace")
-        or (f"user-apps-{app_filter}" if app_filter else current_app.config["DEFAULT_NAMESPACE"])
+        or (f"{APP_NAMESPACE_PREFIX}{app_filter}" if app_filter else current_app.config["DEFAULT_NAMESPACE"])
     )
-    exclude_app = request.args.get("exclude_application")
     cms = ConfigStoreService.list_configmaps(namespace, app_filter)
     secrets = ConfigStoreService.list_secrets(namespace, app_filter)
     items = []
@@ -104,16 +102,6 @@ def available_env_from():
             "app": s.get("app") or "",
             "keys": s.get("keys", []),
         })
-    if exclude_app:
-        cm_default = ConfigStoreService.configmap_name_for(exclude_app)
-        secret_default = ConfigStoreService.secret_name_for(exclude_app)
-        items = [
-            it for it in items
-            if not (
-                (it["type"] == "config_map" and it["name"] == cm_default and it["app"] == exclude_app)
-                or (it["type"] == "secret" and it["name"] == secret_default and it["app"] == exclude_app)
-            )
-        ]
     items.sort(key=lambda it: (it["type"], it["name"]))
     return jsonify({"items": items, "namespace": namespace})
 

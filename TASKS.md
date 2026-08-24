@@ -36,3 +36,6 @@ h07:
 H08: Tanto en configs de secrets y configmaps, quita los 2 filtros de namespace y app, ya que estos recordando ya estan en el entorno atual entonces podria ser un poco redudantre.
 H09: Como parte del trazabilidad en el backend, al generarse un error en cualquier procesos generado por una request http, debes genear un uuid por cada peticion y que sea rastreado en los diferentes logs, usando el contexto de contextvars o similar, la ides es que si se genera un error se retorne al usuari oese uuid y luego el desarrollador o persona de soporte pueda rastreasr paso por paso lo sucedido con este uuid en el api. hazme preguntas. }
 H10: En el front esta url /scoops/new que es para crear un nuevo scope, en la parte de versiones permite mediante yn formulario de select mostrar las ultimas 10 versiones, tambien poder hacer busqueda conservando el liminte de 10. la idea es que sea algo simple pero versatil para el usuario.
+
+H11:
+ EN la lista de scoops, quita la columna de application y deja solo Name, ya se sabe que por seleccion global en que app se esta trabajando

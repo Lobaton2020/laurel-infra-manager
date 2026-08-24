@@ -16,6 +16,7 @@ from kubernetes.client.exceptions import ApiException
 
 from app.core.db import db
 from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.constants import APP_NAMESPACE_PREFIX
 from app.core.utils import utcnow
 from app.modules.audits.service import AuditService
 from app.modules.cluster.service import K8sService
@@ -209,7 +210,7 @@ class DomainService:
         from app.modules.scoops.service import ScoopService
 
         scoop = ScoopService.get(domain.scoop_id)
-        namespace = domain.application.slug
+        namespace = f"{APP_NAMESPACE_PREFIX}{domain.application.slug}"
 
         # Auto-crear namespace si no existe (mismo patron que DeployService).
         if not K8sService.namespace_exists(namespace):
@@ -269,7 +270,7 @@ class DomainService:
     @staticmethod
     def undeploy(domain: Domain) -> dict:
         """Elimina Certificate, Ingress y DNS override en orden inverso."""
-        namespace = domain.application.slug
+        namespace = f"{APP_NAMESPACE_PREFIX}{domain.application.slug}"
         results = []
 
         # Certificate primero (lo emite cert-manager basado en el Ingress).
@@ -311,7 +312,7 @@ class DomainService:
     @staticmethod
     def status(domain: Domain) -> dict:
         """Contrasta el domain con el cluster y promueve `status`."""
-        namespace = domain.application.slug
+        namespace = f"{APP_NAMESPACE_PREFIX}{domain.application.slug}"
         cert_name = f"domain-{domain.id}-tls"
         ingress_name = f"domain-{domain.id}"
 

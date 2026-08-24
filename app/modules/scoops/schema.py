@@ -95,7 +95,9 @@ class ScoopBase(BaseModel):
     # Opcional: si no llega, se deriva de `application`. Un scoop es la infra de
     # una aplicacion, asi que el nombre por defecto es el de la aplicacion.
     name: Optional[str] = Field(None, max_length=63)
-    application: str = Field(..., min_length=1, max_length=100)
+    # `application` se autoderiva del slug de la Application cuando llega
+    # `application_id`. Al menos uno de los dos debe estar presente.
+    application: Optional[str] = Field(None, max_length=100)
     application_id: Optional[int] = None
     type: ComponentType = "api"
     version: Optional[str] = Field(None, max_length=100)
@@ -151,7 +153,9 @@ class ScoopBase(BaseModel):
 
     @model_validator(mode="after")
     def validate_consistency(self):
-        if not self.name:
+        if not self.application and self.application_id is None:
+            raise ValueError("application o application_id es obligatorio")
+        if not self.name and self.application:
             derived = slugify(self.application)
             if not DNS_LABEL.match(derived or ""):
                 raise ValueError(
@@ -174,7 +178,7 @@ class ScoopUpdate(BaseModel):
     """Actualizacion parcial. `name` y `type` son inmutables: cambiarlos dejaria
     recursos huerfanos en el cluster."""
 
-    application: Optional[str] = Field(None, min_length=1, max_length=100)
+    application: Optional[str] = Field(None, max_length=100)
     application_id: Optional[int] = None
     version: Optional[str] = Field(None, max_length=100)
     status: Optional[ScoopStatus] = None

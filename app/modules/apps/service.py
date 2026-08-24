@@ -8,6 +8,7 @@ from app.core.db import db
 from app.core.errors import AppError, ClusterError, ConflictError, NotFoundError
 from app.core.utils import utcnow
 from app.modules.apps.model import AppEvent, Application
+from app.core.constants import APP_NAMESPACE_PREFIX
 from app.modules.audits.service import AuditService
 from app.modules.scoops.schema import slugify
 from app.modules.workspaces.model import Workspace
@@ -97,7 +98,7 @@ class AppsService:
         created_k8s_namespace = False
         created_jenkins_job = False
         created_docker_repo = False
-        ns = f"user-apps-{slug}"
+        ns = f"{APP_NAMESPACE_PREFIX}{slug}"
 
         # Step 1: repo GitHub (si se pidio crearlo).
         if github_url:
@@ -391,7 +392,7 @@ class AppsService:
 
         app = AppsService.get(app_id)
         slug = app.slug
-        ns = f"user-apps-{slug}"
+        ns = f"{APP_NAMESPACE_PREFIX}{slug}"
 
         # 0) Snapshot completo de la config para trazabilidad (en
         #    `app_deletion_logs` que NO tiene FK a `applications`).

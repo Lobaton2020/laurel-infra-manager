@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.db import db
 from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.constants import APP_NAMESPACE_PREFIX
 from app.modules.audits.service import AuditService
 from app.modules.apps.model import Application
 from app.modules.scoops.model import Scoop
@@ -160,6 +161,11 @@ class ScoopService:
             app = db.session.get(Application, application_id)
             if app is None:
                 raise NotFoundError(f"No existe la aplicacion con id {application_id}")
+            # Si el caller no mando `application` (slug), lo derivamos del record.
+            # Asi el front puede mandar solo `application_id` y evitar errores de
+            # string vacio cuando la app viene del context global.
+            if not data.get("application"):
+                data["application"] = app.slug
 
         # url_registry es IMPLICITO al seleccionar la app: si la app tiene
         # `docker_image_base`, derivamos `<image_base>:<version|latest>` y
@@ -209,7 +215,15 @@ class ScoopService:
             "min_replicas": data.get("min_replicas", 1),
             "max_replicas": data.get("max_replicas", 1),
             "url_registry": url_registry,
-            "namespace": data.get("namespace") or current_app.config["DEFAULT_NAMESPACE"],
+            # Namespace por scoop: si el caller manda override gana; si no, va a
+            # `user-apps-<app.slug>` cuando hay application_id, y al default si
+            # no. Asi cada app queda aislada en su propio namespace y el caller
+            # no tiene que acordarse del prefijo.
+            "namespace": (
+                data.get("namespace")
+                or (f"{APP_NAMESPACE_PREFIX}{app.slug}" if app is not None else None)
+                or current_app.config["DEFAULT_NAMESPACE"]
+            ),
             "schedule": data.get("schedule"),
             "container_port": data.get("container_port") or current_app.config["CONTAINER_PORT"],
             "health_path": data.get("health_path") or "/",

@@ -11,3 +11,7 @@ MANAGED_BY_SELECTOR = f"app.kubernetes.io/managed-by={MANAGED_BY}"
 
 # Prefijo de los labels propios del proyecto.
 LABEL_PREFIX = "laurel.andrelobaton.top"
+
+# Prefijo de los namespaces donde viven los recursos de cada app.
+# Namespace efectivo: f"{APP_NAMESPACE_PREFIX}{app.slug}".
+APP_NAMESPACE_PREFIX = "user-apps-"

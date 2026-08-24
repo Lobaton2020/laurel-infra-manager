@@ -4,6 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.constants import APP_NAMESPACE_PREFIX
+
 # FQDN basico: cada label DNS-1123, al menos un punto, TLD >= 2 chars.
 _HOST_RE = re.compile(
     r"^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)+[a-z]{2,}$"
@@ -83,7 +85,7 @@ class DomainResponse(BaseModel):
             tls=domain.tls,
             status=domain.status,
             secret_name=domain.secret_name,
-            namespace=domain.application.slug,
+            namespace=f"{APP_NAMESPACE_PREFIX}{domain.application.slug}",
             scoop_name=domain.scoop.name,
             application_slug=domain.application.slug,
             created_at=domain.created_at.isoformat() if domain.created_at else "",

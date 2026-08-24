@@ -25,7 +25,6 @@ def fake_cluster():
 @pytest.fixture
 def app_and_scoop(client):
     """Crea una Application + Scoop tipo api para usar como base."""
-    from app.modules.scoops.model import Scoop
     from app.modules.apps.model import Application
     from app.core.db import db
 
@@ -33,18 +32,14 @@ def app_and_scoop(client):
     db.session.add(app_obj)
     db.session.commit()
 
-    # Scoop tipo api
+    # Solo `application_id` es obligatorio: ScoopService.create deriva `application`
+    # (slug) desde app_record si el caller no lo manda. Sin hack SQL ni string redundante.
     payload = {
-        "name": "webapp", "application": "notas", "type": "api",
+        "name": "webapp", "type": "api",
         "url_registry": "aflobaton/notas:latest",
-        "application_id": str(app_obj.id),  # Pydantic lo acepta como str
+        "application_id": app_obj.id,
     }
     created = client.post("/api/scoops", json=payload).get_json()
-    # Necesitamos que el scoop apunte al app_id (no a la string application)
-    # ScoopCreate no acepta application_id actualmente. Lo setamos via SQL.
-    scoop = Scoop.query.get(created["id"])
-    scoop.application_id = app_obj.id
-    db.session.commit()
 
     return app_obj.id, created["id"]
 
@@ -61,7 +56,7 @@ class TestDomainCreate:
         data = r.get_json()
         assert data["host"] == "notas.resto.com"
         assert data["secret_name"] == "notas-resto-com"
-        assert data["namespace"] == "notas"
+        assert data["namespace"] == "user-apps-notas"
 
     def test_create_invalid_host(self, client, app_and_scoop):
         app_id, scoop_id = app_and_scoop
@@ -175,7 +170,7 @@ class TestDomainDeploy:
         assert r.status_code == 200
         data = r.get_json()
         assert data["host"] == "deploy.resto.com"
-        assert data["namespace"] == "notas"
+        assert data["namespace"] == "user-apps-notas"
         kinds = [res["kind"] for res in data["resources"]]
         assert "Ingress" in kinds
         assert "Certificate" in kinds
