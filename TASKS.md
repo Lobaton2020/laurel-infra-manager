@@ -31,7 +31,7 @@ H06:
  - A nivel de front en donde se muestra el eestado de la version en la parte derecha de muestra u enlace hacia jenkins para ver el deploy, ese link actualmente no va a donde deberia, teniendo en cuenta la herramienta o pluggin de ocean blue debe llevarme alla para ver el detalle de los steps https://jenkins.andreslobaton.top/blue/organizations/jenkins/{APP_NAME}/detail/{APP_NAME}/{ID_JOB}/pipeline/
 
 h07:
- - LAs anivaciones que se muestran en l parte del login se ven bien aunque en el costado derecho de algunas de las horas se ve que se corta y no logra llegar hasta el piso, lo que da ma imprecion que se corta parte de la hola. hazme preguntas para clarificarlo.
+ - LAs aniMaciones que se muestran en l parte del login se ven bien aunque en el costado derecho de algunas de las horas se ve que se corta y no logra llegar hasta el piso, lo que da ma imprecion que se corta parte de la hola. hazme preguntas para clarificarlo.
 
 H08: Tanto en configs de secrets y configmaps, quita los 2 filtros de namespace y app, ya que estos recordando ya estan en el entorno atual entonces podria ser un poco redudantre.
 H09: Como parte del trazabilidad en el backend, al generarse un error en cualquier procesos generado por una request http, debes genear un uuid por cada peticion y que sea rastreado en los diferentes logs, usando el contexto de contextvars o similar, la ides es que si se genera un error se retorne al usuari oese uuid y luego el desarrollador o persona de soporte pueda rastreasr paso por paso lo sucedido con este uuid en el api. hazme preguntas. }
